@@ -83,6 +83,7 @@ export function Preview({
   onCaptionSettingsChange,
   onAutoFrame,
   autoFrameBusy = false,
+  exportBusy = false,
 }: {
   projectId: string;
   timeline: Timeline;
@@ -110,6 +111,8 @@ export function Preview({
   }) => void;
   onAutoFrame?: () => void;
   autoFrameBusy?: boolean;
+  /** Pause decoder / skip MediaPipe while a heavy export runs. */
+  exportBusy?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const blurRef = useRef<HTMLVideoElement>(null);
@@ -367,8 +370,8 @@ export function Preview({
 
   // Live face check so preview reacts even before a full auto-enquadrar pass.
   useEffect(() => {
-    if (!captionAvoidFaces || !cue) {
-      setLiveCaptionPlace(null);
+    if (exportBusy || !captionAvoidFaces || !cue) {
+      if (exportBusy) setLiveCaptionPlace(null);
       return;
     }
     const el = videoRef.current;
@@ -378,12 +381,18 @@ export function Preview({
       void detectCaptionPlaceFromVideo(el).then((place) => {
         if (!cancelled && place) setLiveCaptionPlace(place);
       });
-    }, playing ? 280 : 80);
+    }, playing ? 500 : 160);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [captionAvoidFaces, cue?.id, timeMs, playing, blobUrl]);
+  }, [captionAvoidFaces, cue?.id, timeMs, playing, blobUrl, exportBusy]);
+
+  useEffect(() => {
+    if (!exportBusy) return;
+    videoRef.current?.pause();
+    blurRef.current?.pause();
+  }, [exportBusy]);
 
   const hasCaptions = Boolean(
     timeline.tracks.find((t) => t.type === "captions" && t.cues.length > 0),

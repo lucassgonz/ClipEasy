@@ -52,11 +52,14 @@ export function SidePanel({
   onProject,
   onOpenExport,
   selectedClipId = null,
+  onBusyChange,
 }: {
   project: Project;
   onProject: (p: Project) => void;
   onOpenExport?: () => void;
   selectedClipId?: string | null;
+  /** True while a long job (export/import/captions) is running — pause preview to free RAM. */
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [url, setUrl] = useState("");
   const [splitSec, setSplitSec] = useState(60);
@@ -77,6 +80,11 @@ export function SidePanel({
     videoTrack && videoTrack.type === "video" ? videoTrack.clips.length : 0;
   const alreadyDivided = videoClipCount >= 2;
   const busy = status?.kind === "processing";
+
+  useEffect(() => {
+    onBusyChange?.(busy);
+    return () => onBusyChange?.(false);
+  }, [busy, onBusyChange]);
 
   useEffect(() => {
     if (selectedClipId && clipMeta.some((m) => m.clipId === selectedClipId)) {
@@ -184,7 +192,7 @@ export function SidePanel({
       if (job.status === "error") {
         throw new Error(job.error || "Falha ao exportar clipes");
       }
-      await new Promise((r) => setTimeout(r, 800));
+      await new Promise((r) => setTimeout(r, 1200));
     }
   }
 

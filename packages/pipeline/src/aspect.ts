@@ -1,7 +1,11 @@
 import path from "node:path";
 import { mustRun } from "./binaries.js";
-import type { ExportFormat, ExportQuality, Resolution, VerticalMode } from "./types.js";
-import { qualitySettings, resolutionHeight } from "./types.js";
+import {
+  encodeVideoAudioArgs,
+  type EncodeOpts,
+} from "./encode.js";
+import type { ExportFormat, Resolution, VerticalMode } from "./types.js";
+import { resolutionHeight } from "./types.js";
 
 function targetSize(res: Resolution, orientation: "horizontal" | "vertical") {
   const h = resolutionHeight(res);
@@ -11,12 +15,7 @@ function targetSize(res: Resolution, orientation: "horizontal" | "vertical") {
   return { width: h, height: Math.round((h * 16) / 9) };
 }
 
-export interface EncodeOpts {
-  fps?: number;
-  quality?: ExportQuality;
-  audioBitrate?: string;
-  format?: ExportFormat;
-}
+export type { EncodeOpts };
 
 export interface CropFocusKeyframe {
   tMs: number;
@@ -24,26 +23,7 @@ export interface CropFocusKeyframe {
 }
 
 function encodeTail(outputPath: string, opts: EncodeOpts = {}): string[] {
-  const { crf, preset } = qualitySettings(opts.quality ?? "high");
-  const args = [
-    "-c:v",
-    "libx264",
-    "-preset",
-    preset,
-    "-crf",
-    String(crf),
-    "-c:a",
-    "aac",
-    "-b:a",
-    opts.audioBitrate ?? "192k",
-    "-movflags",
-    "+faststart",
-  ];
-  if (opts.fps && opts.fps > 0) {
-    args.push("-r", String(opts.fps));
-  }
-  args.push(outputPath);
-  return args;
+  return [...encodeVideoAudioArgs(opts), outputPath];
 }
 
 function clamp01(n: number): number {
@@ -56,6 +36,34 @@ function escExpr(expr: string): string {
 }
 
 /**
+ * Drop near-static tracks to a single focus, and cap keypoints so crop exprs stay small.
+ */
+export function simplifyCropFocusTrack(
+  track: CropFocusKeyframe[] | undefined,
+  fallback = 0.5,
+  maxPts = 16,
+): CropFocusKeyframe[] | undefined {
+  if (!track || track.length === 0) return undefined;
+  const sorted = [...track]
+    .map((k) => ({ tMs: Math.max(0, k.tMs), x: clamp01(k.x) }))
+    .sort((a, b) => a.tMs - b.tMs);
+  const xs = sorted.map((k) => k.x);
+  const min = Math.min(...xs);
+  const max = Math.max(...xs);
+  if (max - min < 0.045) {
+    const avg = xs.reduce((a, b) => a + b, 0) / xs.length;
+    return [{ tMs: 0, x: avg }];
+  }
+  if (sorted.length <= maxPts) return sorted;
+  const used: CropFocusKeyframe[] = [];
+  const step = (sorted.length - 1) / (maxPts - 1);
+  for (let i = 0; i < maxPts; i += 1) {
+    used.push(sorted[Math.round(i * step)]!);
+  }
+  return used.length ? used : [{ tMs: 0, x: fallback }];
+}
+
+/**
  * Piecewise-linear focus(t) for ffmpeg crop x expression (uses `t`).
  * `t` is seconds from the start of the input being cropped.
  */
@@ -63,32 +71,22 @@ export function buildCropFocusExpr(
   track: CropFocusKeyframe[],
   fallback = 0.5,
 ): string {
-  const pts = track
-    .map((k) => ({ t: Math.max(0, k.tMs) / 1000, x: clamp01(k.x) }))
-    .sort((a, b) => a.t - b.t);
+  const pts = (simplifyCropFocusTrack(track, fallback) ?? []).map((k) => ({
+    t: k.tMs / 1000,
+    x: clamp01(k.x),
+  }));
   if (pts.length === 0) return fallback.toFixed(4);
   if (pts.length === 1) return pts[0]!.x.toFixed(4);
 
-  // Cap expression size for long tracks.
-  const maxPts = 60;
-  let used = pts;
-  if (pts.length > maxPts) {
-    const step = (pts.length - 1) / (maxPts - 1);
-    used = [];
-    for (let i = 0; i < maxPts; i += 1) {
-      used.push(pts[Math.round(i * step)]!);
-    }
-  }
-
-  let expr = used[used.length - 1]!.x.toFixed(4);
-  for (let i = used.length - 2; i >= 0; i -= 1) {
-    const a = used[i]!;
-    const b = used[i + 1]!;
+  let expr = pts[pts.length - 1]!.x.toFixed(4);
+  for (let i = pts.length - 2; i >= 0; i -= 1) {
+    const a = pts[i]!;
+    const b = pts[i + 1]!;
     const span = Math.max(0.001, b.t - a.t);
     const lerp = `${a.x.toFixed(4)}+(${b.x.toFixed(4)}-${a.x.toFixed(4)})*(t-${a.t.toFixed(4)})/${span.toFixed(4)}`;
     expr = `if(lt(t,${b.t.toFixed(4)}),${lerp},${expr})`;
   }
-  const first = used[0]!;
+  const first = pts[0]!;
   if (first.t > 0.001) {
     expr = `if(lt(t,${first.t.toFixed(4)}),${first.x.toFixed(4)},${expr})`;
   }
@@ -122,7 +120,50 @@ export function offsetCropFocusTrack(
   if (mapped[0]!.tMs > 0) {
     mapped.unshift({ tMs: 0, x: mapped[0]!.x });
   }
-  return mapped;
+  return simplifyCropFocusTrack(mapped);
+}
+
+/** Horizontal cover scale + center crop. */
+export function buildHorizontalVf(width: number, height: number): string {
+  return [
+    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+    `crop=${width}:${height}`,
+    "setsar=1",
+  ].join(",");
+}
+
+/** Vertical cover scale + focus crop (static or animated). */
+export function buildVerticalCropVf(
+  width: number,
+  height: number,
+  cropFocusX = 0.5,
+  cropFocusTrack?: CropFocusKeyframe[],
+): string {
+  const focus = Math.min(1, Math.max(0, cropFocusX));
+  const simplified = simplifyCropFocusTrack(cropFocusTrack, focus);
+  const useTrack = simplified && simplified.length > 0;
+  const xExpr = useTrack
+    ? `(iw-${width})*(${escExpr(buildCropFocusExpr(simplified!, focus))})`
+    : `(iw-${width})*${focus.toFixed(4)}`;
+  return [
+    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+    `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
+    "setsar=1",
+  ].join(",");
+}
+
+export function verticalTargetSize(resolution: Resolution): {
+  width: number;
+  height: number;
+} {
+  return targetSize(resolution, "vertical");
+}
+
+export function horizontalTargetSize(resolution: Resolution): {
+  width: number;
+  height: number;
+} {
+  return targetSize(resolution, "horizontal");
 }
 
 export async function exportHorizontal(
@@ -133,11 +174,7 @@ export async function exportHorizontal(
   encode: EncodeOpts = {},
 ): Promise<void> {
   const { width, height } = targetSize(resolution, "horizontal");
-  const filter = [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
-    `crop=${width}:${height}`,
-    "setsar=1",
-  ].join(",");
+  const filter = buildHorizontalVf(width, height);
 
   await mustRun(
     "ffmpeg",
@@ -155,16 +192,18 @@ export async function exportVertical(
   encode: EncodeOpts = {},
   cropFocusX = 0.5,
   cropFocusTrack?: CropFocusKeyframe[],
+  assFilter?: string,
 ): Promise<void> {
   const { width, height } = targetSize(resolution, "vertical");
   const focus = Math.min(1, Math.max(0, cropFocusX));
   const tail = encodeTail(outputPath, encode);
+  const assSuffix = assFilter ? `,${assFilter}` : "";
 
   if (mode === "blur") {
     const filterComplex = [
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=20[bg]`,
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease[fg]`,
-      `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]`,
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${assFilter ? `,${assFilter}` : ""}[v]`,
     ].join(";");
 
     await mustRun(
@@ -186,22 +225,29 @@ export async function exportVertical(
     return;
   }
 
-  const useTrack = cropFocusTrack && cropFocusTrack.length > 0;
-  const xExpr = useTrack
-    ? `(iw-${width})*(${escExpr(buildCropFocusExpr(cropFocusTrack!, focus))})`
-    : `(iw-${width})*${focus.toFixed(4)}`;
-
-  // Note: some static ffmpeg builds (e.g. 6.0) have no crop `eval=` option;
-  // x/y expressions are still timeline-evaluated when they reference `t`.
-  const filter = [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
-    `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
-    "setsar=1",
-  ].join(",");
+  const filter =
+    buildVerticalCropVf(width, height, focus, cropFocusTrack) + assSuffix;
 
   await mustRun(
     "ffmpeg",
-    ["-y", "-i", inputPath, "-vf", filter, ...tail],
+    ["-y", "-i", inputPath, "-vf", filter, ...encodeTail(outputPath, encode)],
+    onProgress,
+  );
+}
+
+export async function exportHorizontalWithAss(
+  inputPath: string,
+  outputPath: string,
+  resolution: Resolution,
+  assFilter: string,
+  onProgress?: (chunk: string) => void,
+  encode: EncodeOpts = {},
+): Promise<void> {
+  const { width, height } = targetSize(resolution, "horizontal");
+  const filter = `${buildHorizontalVf(width, height)},${assFilter}`;
+  await mustRun(
+    "ffmpeg",
+    ["-y", "-i", inputPath, "-vf", filter, ...encodeTail(outputPath, encode)],
     onProgress,
   );
 }

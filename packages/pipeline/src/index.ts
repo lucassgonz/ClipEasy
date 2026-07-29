@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./binaries.js";
+export * from "./encode.js";
 export * from "./download.js";
 export * from "./trim.js";
 export * from "./silence.js";

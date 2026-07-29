@@ -3,6 +3,11 @@ import path from "node:path";
 import { writeAssFile } from "./captions.js";
 import { mustRun } from "./binaries.js";
 import {
+  encodeProfile,
+  encodeVideoAudioArgs,
+  makeFfmpegProgressHandler,
+} from "./encode.js";
+import {
   clipDurationMs,
   clipSpeed,
   getCaptionsTrack,
@@ -16,8 +21,18 @@ import type {
   ExportQuality,
   Resolution,
 } from "./types.js";
-import { qualitySettings, resolutionHeight } from "./types.js";
-import { exportHorizontal, exportVertical, offsetCropFocusTrack } from "./aspect.js";
+import { resolutionHeight } from "./types.js";
+import {
+  buildHorizontalVf,
+  buildVerticalCropVf,
+  exportHorizontal,
+  exportHorizontalWithAss,
+  exportVertical,
+  horizontalTargetSize,
+  offsetCropFocusTrack,
+  verticalTargetSize,
+  type CropFocusKeyframe,
+} from "./aspect.js";
 
 export interface ExportTimelineOptions {
   resolution?: Resolution;
@@ -37,6 +52,8 @@ export interface ExportTimelineOptions {
   quality?: ExportQuality;
   audioBitrate?: "128k" | "192k" | "320k";
 }
+
+const CHUNK_CONCURRENCY = 2;
 
 function assetPath(assetsDir: string, assetId: string, filename: string): string {
   return path.join(assetsDir, assetId, filename);
@@ -58,6 +75,23 @@ function atempoChain(speed: number): string {
   return parts.join(",");
 }
 
+function clipAudioFilters(clip: VideoClip): string[] {
+  const speed = clipSpeed(clip);
+  const muted = Boolean(clip.muted) || (clip.volume ?? 1) <= 0.001;
+  const volume = muted ? 0 : Math.min(2, Math.max(0, clip.volume ?? 1));
+  const af: string[] = [];
+  if (Math.abs(speed - 1) > 0.001) af.push(atempoChain(speed));
+  if (muted) af.push("volume=0");
+  else if (Math.abs(volume - 1) > 0.001) af.push(`volume=${volume.toFixed(3)}`);
+  return af;
+}
+
+function clipVideoSpeedFilter(clip: VideoClip): string | null {
+  const speed = clipSpeed(clip);
+  if (Math.abs(speed - 1) <= 0.001) return null;
+  return `setpts=PTS/${speed}`;
+}
+
 async function renderClipSegment(
   input: string,
   out: string,
@@ -65,56 +99,20 @@ async function renderClipSegment(
   fps: number,
   quality: ExportQuality,
   audioBitrate: string,
+  speedBias = false,
 ): Promise<void> {
   const start = (clip.inMs / 1000).toFixed(3);
   const end = (clip.outMs / 1000).toFixed(3);
-  const speed = clipSpeed(clip);
-  const { crf, preset } = qualitySettings(quality);
-  const muted = Boolean(clip.muted) || (clip.volume ?? 1) <= 0.001;
-  const volume = muted ? 0 : Math.min(2, Math.max(0, clip.volume ?? 1));
-
   const vf: string[] = [];
-  const af: string[] = [];
-  if (Math.abs(speed - 1) > 0.001) {
-    vf.push(`setpts=PTS/${speed}`);
-    af.push(atempoChain(speed));
-  }
-  if (muted) {
-    af.push("volume=0");
-  } else if (Math.abs(volume - 1) > 0.001) {
-    af.push(`volume=${volume.toFixed(3)}`);
-  }
+  const speedF = clipVideoSpeedFilter(clip);
+  if (speedF) vf.push(speedF);
+  const af = clipAudioFilters(clip);
 
-  const args = [
-    "-y",
-    "-ss",
-    start,
-    "-to",
-    end,
-    "-i",
-    input,
-  ];
-  if (vf.length) {
-    args.push("-vf", vf.join(","));
-  }
-  if (af.length) {
-    args.push("-af", af.join(","));
-  }
+  const args = ["-y", "-ss", start, "-to", end, "-i", input];
+  if (vf.length) args.push("-vf", vf.join(","));
+  if (af.length) args.push("-af", af.join(","));
   args.push(
-    "-c:v",
-    "libx264",
-    "-preset",
-    preset,
-    "-crf",
-    String(crf),
-    "-r",
-    String(fps),
-    "-c:a",
-    "aac",
-    "-b:a",
-    audioBitrate,
-    "-movflags",
-    "+faststart",
+    ...encodeVideoAudioArgs({ fps, quality, audioBitrate, speedBias }),
     out,
   );
   await mustRun("ffmpeg", args);
@@ -169,7 +167,7 @@ async function renderGapSegment(
   audioBitrate: string,
 ): Promise<void> {
   const dur = Math.max(0.04, durationMs / 1000);
-  const { crf, preset } = qualitySettings(quality);
+  const { crf, preset } = encodeProfile({ quality });
   await mustRun("ffmpeg", [
     "-y",
     "-f",
@@ -243,8 +241,29 @@ async function concatSegments(
     .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
     .join("\n");
   await writeFile(list, body, "utf8");
-  const { crf, preset } = qualitySettings(quality);
-  // Re-encode for consistent timestamps after mixed gap/clip segments
+
+  // Prefer stream copy when all segments already share codecs (huge win).
+  try {
+    await mustRun("ffmpeg", [
+      "-y",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      list,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      output,
+    ]);
+    return;
+  } catch {
+    // Fall through to re-encode for mismatched timestamps/codecs.
+  }
+
+  const { crf, preset } = encodeProfile({ quality });
   await mustRun("ffmpeg", [
     "-y",
     "-f",
@@ -309,7 +328,6 @@ async function concatWithTransitions(
     let lastV = "[0:v]";
     let lastA = "[0:a]";
     let offset = 0;
-    // Approximate offsets from probe durations — use clip durations passed via transitionMs as duration of PREVIOUS visual segment
     for (let i = 1; i < segments.length; i += 1) {
       const td = Math.min(
         1,
@@ -325,7 +343,7 @@ async function concatWithTransitions(
       lastV = outV;
       lastA = outA;
     }
-    const { crf, preset } = qualitySettings(quality);
+    const { crf, preset } = encodeProfile({ quality });
     await mustRun("ffmpeg", [
       "-y",
       ...inputs,
@@ -361,6 +379,136 @@ async function concatWithTransitions(
       fps,
     );
   }
+}
+
+function escapeAssFilterPath(assPath: string): string {
+  const escaped = assPath
+    .replace(/\\/g, "/")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'");
+  return `ass='${escaped}'`;
+}
+
+async function mapPool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const n = Math.max(1, Math.min(concurrency, items.length || 1));
+  await Promise.all(
+    Array.from({ length: n }, async () => {
+      for (;;) {
+        const i = next;
+        next += 1;
+        if (i >= items.length) return;
+        await worker(items[i]!, i);
+      }
+    }),
+  );
+}
+
+/**
+ * One ffmpeg invocation: seek + optional speed/volume + H or V reframe.
+ * Avoids the previous cut → intermediate → re-encode double pass.
+ */
+async function renderAspectClipOnePass(opts: {
+  input: string;
+  out: string;
+  clip: VideoClip;
+  fps: number;
+  quality: ExportQuality;
+  audioBitrate: string;
+  orientation: "horizontal" | "vertical";
+  resolution: Resolution;
+  verticalMode: "crop" | "blur";
+  cropFocusX: number;
+  cropFocusTrack?: CropFocusKeyframe[];
+  speedBias?: boolean;
+  onProgress?: (ratio: number) => void;
+}): Promise<void> {
+  const {
+    input,
+    out,
+    clip,
+    fps,
+    quality,
+    audioBitrate,
+    orientation,
+    resolution,
+    verticalMode,
+    cropFocusX,
+    cropFocusTrack,
+    speedBias,
+    onProgress,
+  } = opts;
+
+  const start = (clip.inMs / 1000).toFixed(3);
+  const end = (clip.outMs / 1000).toFixed(3);
+  const speed = clipSpeed(clip);
+  const inputDur = Math.max(0.05, (clip.outMs - clip.inMs) / 1000);
+  const outDur = inputDur / Math.max(0.05, speed);
+  const progressCb = makeFfmpegProgressHandler(outDur, onProgress);
+
+  const speedF = clipVideoSpeedFilter(clip);
+  const af = clipAudioFilters(clip);
+  const encode = encodeVideoAudioArgs({
+    fps,
+    quality,
+    audioBitrate,
+    speedBias,
+  });
+
+  if (orientation === "horizontal") {
+    const { width, height } = horizontalTargetSize(resolution);
+    const parts = [speedF, buildHorizontalVf(width, height)].filter(
+      Boolean,
+    ) as string[];
+    const args = ["-y", "-ss", start, "-to", end, "-i", input, "-vf", parts.join(",")];
+    if (af.length) args.push("-af", af.join(","));
+    args.push(...encode, out);
+    await mustRun("ffmpeg", args, progressCb);
+    return;
+  }
+
+  const { width, height } = verticalTargetSize(resolution);
+
+  if (verticalMode === "blur") {
+    const pre = speedF ? `${speedF},` : "";
+    const filterComplex = [
+      `[0:v]${pre}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=20[bg]`,
+      `[0:v]${pre}scale=${width}:${height}:force_original_aspect_ratio=decrease[fg]`,
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]`,
+    ].join(";");
+    const args = [
+      "-y",
+      "-ss",
+      start,
+      "-to",
+      end,
+      "-i",
+      input,
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "[v]",
+      "-map",
+      "0:a?",
+    ];
+    if (af.length) args.push("-af", af.join(","));
+    args.push(...encode, out);
+    await mustRun("ffmpeg", args, progressCb);
+    return;
+  }
+
+  const parts = [
+    speedF,
+    buildVerticalCropVf(width, height, cropFocusX, cropFocusTrack),
+  ].filter(Boolean) as string[];
+  const args = ["-y", "-ss", start, "-to", end, "-i", input, "-vf", parts.join(",")];
+  if (af.length) args.push("-af", af.join(","));
+  args.push(...encode, out);
+  await mustRun("ffmpeg", args, progressCb);
 }
 
 export async function exportFromTimeline(params: {
@@ -428,7 +576,11 @@ export async function exportFromTimeline(params: {
     if (!meta) throw new Error(`Asset ausente: ${clip.assetId}`);
     const input = assetPath(assetsDir, clip.assetId, meta.filename);
     const seg = path.join(workDir, `seg_${String(i).padStart(3, "0")}.mp4`);
-    await renderClipSegment(input, seg, clip, fps, quality, audioBitrate);
+    if (canStreamCopyClip(clip)) {
+      await cutClipSegmentCopy(input, seg, clip);
+    } else {
+      await renderClipSegment(input, seg, clip, fps, quality, audioBitrate);
+    }
     if (i === 0) {
       refSize = await probeSize(seg);
     }
@@ -466,12 +618,10 @@ export async function exportFromTimeline(params: {
     options.burnCaptions !== false ? getCaptionsTrack(timeline).cues : [];
   const shouldBurn = captions.some((c) => c.text.trim());
 
-  async function burnOnto(
-    inputPath: string,
-    outputPath: string,
+  async function writeAss(
     playRes: { x: number; y: number },
     assName: string,
-  ): Promise<void> {
+  ): Promise<string> {
     const assPath = path.join(workDir, assName);
     await writeAssFile(captions, assPath, {
       playRes,
@@ -479,31 +629,7 @@ export async function exportFromTimeline(params: {
       avoidFaces: options.captionAvoidFaces !== false,
       anchorTrack: options.captionAnchorTrack,
     });
-    const escaped = assPath
-      .replace(/\\/g, "/")
-      .replace(/:/g, "\\:")
-      .replace(/'/g, "\\'");
-    const { crf, preset } = qualitySettings(quality);
-    await mustRun("ffmpeg", [
-      "-y",
-      "-i",
-      inputPath,
-      "-vf",
-      `ass='${escaped}'`,
-      "-c:v",
-      "libx264",
-      "-preset",
-      preset,
-      "-crf",
-      String(crf),
-      "-r",
-      String(fps),
-      "-c:a",
-      "copy",
-      "-movflags",
-      "+faststart",
-      outputPath,
-    ]);
+    return escapeAssFilterPath(assPath);
   }
 
   function playResFor(
@@ -521,7 +647,28 @@ export async function exportFromTimeline(params: {
     const dest = path.join(outputDir, name);
     if (shouldBurn) {
       params.onProgress?.("Gravando legendas", 70);
-      await burnOnto(composed, dest, playResFor("vertical"), "captions_plain.ass");
+      const ass = await writeAss(playResFor("vertical"), "captions_plain.ass");
+      const { crf, preset } = encodeProfile({ quality });
+      await mustRun("ffmpeg", [
+        "-y",
+        "-i",
+        composed,
+        "-vf",
+        ass,
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        String(crf),
+        "-r",
+        String(fps),
+        "-c:a",
+        "copy",
+        "-movflags",
+        "+faststart",
+        dest,
+      ]);
     } else {
       await copyFile(composed, dest);
     }
@@ -533,10 +680,8 @@ export async function exportFromTimeline(params: {
     const name = `export_horizontal_16x9.${ext}`;
     const dest = path.join(outputDir, name);
     if (shouldBurn) {
-      const reframed = path.join(workDir, `h_reframed.${ext}`);
-      await exportHorizontal(composed, reframed, resolution, undefined, encode);
-      params.onProgress?.("Legendas (horizontal)", 78);
-      await burnOnto(reframed, dest, playResFor("horizontal"), "captions_h.ass");
+      const ass = await writeAss(playResFor("horizontal"), "captions_h.ass");
+      await exportHorizontalWithAss(composed, dest, resolution, ass, undefined, encode);
     } else {
       await exportHorizontal(composed, dest, resolution, undefined, encode);
     }
@@ -548,19 +693,18 @@ export async function exportFromTimeline(params: {
     const name = `export_vertical_9x16.${ext}`;
     const dest = path.join(outputDir, name);
     if (shouldBurn) {
-      const reframed = path.join(workDir, `v_reframed.${ext}`);
+      const ass = await writeAss(playResFor("vertical"), "captions_v.ass");
       await exportVertical(
         composed,
-        reframed,
+        dest,
         resolution,
         options.verticalMode ?? "crop",
         undefined,
         encode,
         options.cropFocusX ?? 0.5,
         options.cropFocusTrack,
+        ass,
       );
-      params.onProgress?.("Legendas (vertical)", 94);
-      await burnOnto(reframed, dest, playResFor("vertical"), "captions_v.ass");
     } else {
       await exportVertical(
         composed,
@@ -638,7 +782,6 @@ export async function exportTimelineChunks(params: {
   const resolution = options.resolution ?? "1080p";
   const wantH = options.exportHorizontal === true;
   const wantV = options.exportVertical === true;
-  // Default: one file per chunk without forced aspect (fast). If H/V asked, apply.
   const plain = !wantH && !wantV;
 
   const videoTrack = getVideoTrack(timeline);
@@ -652,17 +795,17 @@ export async function exportTimelineChunks(params: {
     throw new Error("Nenhum pedaço gerado — verifique a duração do vídeo");
   }
 
-  const results: Array<{ name: string; label: string; path: string }> = [];
-  const encode = { fps, quality, audioBitrate, format };
+  const results: Array<{ name: string; label: string; path: string | null }> =
+    pieces.map(() => ({ name: "", label: "", path: null }));
+  const flatResults: Array<{ name: string; label: string; path: string }> = [];
   const total = pieces.length;
+  let completed = 0;
 
-  for (let i = 0; i < total; i += 1) {
-    const piece = pieces[i]!;
-    const pctStart = Math.round((i / total) * 95);
-    params.onProgress?.(
-      `Exportando pedaço ${i + 1}/${total}`,
-      Math.max(1, pctStart),
-    );
+  const report = (step: string, percent: number) => {
+    params.onProgress?.(step, Math.max(1, Math.min(99, Math.round(percent))));
+  };
+
+  await mapPool(pieces, CHUNK_CONCURRENCY, async (piece, i) => {
     const meta = timeline.assets[piece.assetId];
     if (!meta) throw new Error(`Asset ausente: ${piece.assetId}`);
     const input = assetPath(assetsDir, piece.assetId, meta.filename);
@@ -671,23 +814,92 @@ export async function exportTimelineChunks(params: {
     const startSec = Math.floor(piece.timelineStartMs / 1000);
     const labelTime = `${Math.floor(startSec / 60)}m${String(startSec % 60).padStart(2, "0")}s`;
     const useCopy = canStreamCopyClip(piece);
+    const pieceDur = clipDurationMs(piece) / 1000;
+
+    const updatePiece = (localRatio: number) => {
+      const overall =
+        ((completed + Math.min(0.95, Math.max(0, localRatio))) / total) * 95;
+      report(`Exportando pedaço ${i + 1}/${total}`, overall);
+    };
+
+    updatePiece(0.02);
 
     if (plain && useCopy) {
       const name = `${base}.${ext}`;
       const dest = path.join(outputDir, name);
       await cutClipSegmentCopy(input, dest, piece);
-      results.push({
+      results[i] = {
         name,
         label: `Parte ${i + 1} (${labelTime})`,
         path: dest,
-      });
-      params.onProgress?.(
-        `Pedaço ${i + 1}/${total} pronto`,
-        Math.round(((i + 1) / total) * 95),
-      );
-      continue;
+      };
+      completed += 1;
+      report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+      return;
     }
 
+    // Fast path: single-pass seek + aspect from the source (no intermediate file).
+    if ((wantH || wantV) && !(wantH && wantV)) {
+      const orientation = wantV ? "vertical" : "horizontal";
+      const name = wantV ? `${base}_9x16.${ext}` : `${base}_16x9.${ext}`;
+      const dest = path.join(outputDir, name);
+      const pieceTrack = wantV
+        ? offsetCropFocusTrack(
+            options.cropFocusTrack,
+            piece.timelineStartMs,
+            clipDurationMs(piece),
+          )
+        : undefined;
+      await renderAspectClipOnePass({
+        input,
+        out: dest,
+        clip: piece,
+        fps,
+        quality,
+        audioBitrate,
+        orientation,
+        resolution,
+        verticalMode: options.verticalMode ?? "crop",
+        cropFocusX: options.cropFocusX ?? 0.5,
+        cropFocusTrack: pieceTrack,
+        speedBias: true,
+        onProgress: updatePiece,
+      });
+      results[i] = {
+        name,
+        label: wantV
+          ? `Parte ${i + 1} 9:16 (${labelTime})`
+          : `Parte ${i + 1} 16:9 (${labelTime})`,
+        path: dest,
+      };
+      completed += 1;
+      report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+      return;
+    }
+
+    if (plain) {
+      const name = `${base}.${ext}`;
+      const dest = path.join(outputDir, name);
+      await renderClipSegment(
+        input,
+        dest,
+        piece,
+        fps,
+        quality,
+        audioBitrate,
+        true,
+      );
+      results[i] = {
+        name,
+        label: `Parte ${i + 1} (${labelTime})`,
+        path: dest,
+      };
+      completed += 1;
+      report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+      return;
+    }
+
+    // Both H and V requested: one intermediate, then two reframes.
     const raw = path.join(
       workDir,
       `chunk_${String(i + 1).padStart(3, "0")}.mp4`,
@@ -695,24 +907,30 @@ export async function exportTimelineChunks(params: {
     if (useCopy) {
       await cutClipSegmentCopy(input, raw, piece);
     } else {
-      await renderClipSegment(input, raw, piece, fps, quality, audioBitrate);
+      await renderClipSegment(
+        input,
+        raw,
+        piece,
+        fps,
+        quality,
+        audioBitrate,
+        true,
+      );
     }
+    updatePiece(0.35);
 
-    if (plain) {
-      const name = `${base}.${ext}`;
-      const dest = path.join(outputDir, name);
-      await copyFile(raw, dest);
-      results.push({
-        name,
-        label: `Parte ${i + 1} (${labelTime})`,
-        path: dest,
-      });
-    }
+    const local: Array<{ name: string; label: string; path: string }> = [];
     if (wantH) {
       const name = `${base}_16x9.${ext}`;
       const dest = path.join(outputDir, name);
-      await exportHorizontal(raw, dest, resolution, undefined, encode);
-      results.push({
+      await exportHorizontal(raw, dest, resolution, undefined, {
+        fps,
+        quality,
+        audioBitrate,
+        format,
+        speedBias: true,
+      });
+      local.push({
         name,
         label: `Parte ${i + 1} 16:9 (${labelTime})`,
         path: dest,
@@ -731,24 +949,38 @@ export async function exportTimelineChunks(params: {
         dest,
         resolution,
         options.verticalMode ?? "crop",
-        undefined,
-        encode,
+        makeFfmpegProgressHandler(pieceDur, (r) => updatePiece(0.35 + r * 0.6)),
+        {
+          fps,
+          quality,
+          audioBitrate,
+          format,
+          speedBias: true,
+        },
         options.cropFocusX ?? 0.5,
         pieceTrack,
       );
-      results.push({
+      local.push({
         name,
         label: `Parte ${i + 1} 9:16 (${labelTime})`,
         path: dest,
       });
     }
     await rm(raw, { force: true }).catch(() => undefined);
-    params.onProgress?.(
-      `Pedaço ${i + 1}/${total} pronto`,
-      Math.round(((i + 1) / total) * 95),
-    );
-  }
+    // Store first for slot ordering; extras appended after pool joins.
+    results[i] = local[0] ?? { name: "", label: "", path: null };
+    for (let k = 1; k < local.length; k += 1) {
+      flatResults.push(local[k]!);
+    }
+    completed += 1;
+    report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+  });
 
   params.onProgress?.("Concluído", 100);
-  return results;
+  const ordered = results
+    .filter((r): r is { name: string; label: string; path: string } =>
+      Boolean(r.path),
+    )
+    .concat(flatResults);
+  return ordered;
 }

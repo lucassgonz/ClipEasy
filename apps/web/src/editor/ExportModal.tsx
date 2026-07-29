@@ -44,6 +44,7 @@ export function ExportModal({
   captionStyle = "pop",
   captionAvoidFaces = true,
   captionAnchorTrack,
+  onBusyChange,
 }: {
   projectId: string;
   defaultFps: number;
@@ -61,6 +62,7 @@ export function ExportModal({
   captionStyle?: ExportOptions["captionStyle"];
   captionAvoidFaces?: boolean;
   captionAnchorTrack?: ExportOptions["captionAnchorTrack"];
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [outputs, setOutputs] = useState<"both" | "h" | "v">("both");
   const [verticalMode, setVerticalMode] = useState<"crop" | "blur">(
@@ -91,6 +93,11 @@ export function ExportModal({
   const [cancelling, setCancelling] = useState(false);
   const activeJobId = useRef<string | null>(null);
   const cancelRequested = useRef(false);
+
+  useEffect(() => {
+    onBusyChange?.(busy || status?.kind === "processing");
+    return () => onBusyChange?.(false);
+  }, [busy, status?.kind, onBusyChange]);
 
   useEffect(() => {
     if (!open) return;

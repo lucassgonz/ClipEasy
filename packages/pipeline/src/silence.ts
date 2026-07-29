@@ -132,36 +132,34 @@ export async function removeSilence(
   }
 
   const segmentPaths: string[] = [];
-  for (let i = 0; i < keeps.length; i += 1) {
-    const seg = keeps[i]!;
-    const out = path.join(outputDir, `silence_seg_${i}.mp4`);
-    const segDuration = Math.max(0.1, seg.end - seg.start);
-    await mustRun(
-      "ffmpeg",
-      [
-        "-y",
-        "-ss",
-        String(seg.start),
-        "-i",
-        inputPath,
-        "-t",
-        String(segDuration),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "20",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        out,
-      ],
-      onProgress,
-    );
-    segmentPaths.push(out);
-  }
+  await Promise.all(
+    keeps.map(async (seg, i) => {
+      const out = path.join(outputDir, `silence_seg_${i}.mp4`);
+      const segDuration = Math.max(0.1, seg.end - seg.start);
+      // Stream-copy cuts are keyframe-aligned and much faster than re-encoding.
+      await mustRun(
+        "ffmpeg",
+        [
+          "-y",
+          "-ss",
+          String(seg.start),
+          "-i",
+          inputPath,
+          "-t",
+          String(segDuration),
+          "-c",
+          "copy",
+          "-avoid_negative_ts",
+          "make_zero",
+          "-movflags",
+          "+faststart",
+          out,
+        ],
+        onProgress,
+      );
+      segmentPaths[i] = out;
+    }),
+  );
 
   let outPath: string;
   if (segmentPaths.length === 1) {

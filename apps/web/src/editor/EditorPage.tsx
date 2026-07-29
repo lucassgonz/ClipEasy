@@ -52,6 +52,7 @@ export function EditorPage({
   const [project, setProject] = useState<Project | null>(null);
   const [timeMs, setTimeMs] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [pipelineBusy, setPipelineBusy] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusPopupState | null>(null);
@@ -81,6 +82,11 @@ export function EditorPage({
   projectRef.current = project;
   timeRef.current = timeMs;
   selectedRef.current = selectedId;
+
+  useEffect(() => {
+    if (!pipelineBusy) return;
+    setPlaying(false);
+  }, [pipelineBusy]);
 
   function bumpHistory() {
     setHistTick((n) => n + 1);
@@ -585,6 +591,7 @@ export function EditorPage({
               captionAvoidFaces={captionAvoidFaces}
               captionAnchorTrack={captionAnchorTrack}
               autoFrameBusy={autoFrameBusy}
+              exportBusy={pipelineBusy}
               onAutoFrame={() => void runAutoFrame()}
               onCaptionSettingsChange={(opts) => {
                 saveCaptionMeta(opts);
@@ -692,6 +699,7 @@ export function EditorPage({
                 <SidePanel
                   project={project}
                   selectedClipId={selectedId}
+                  onBusyChange={setPipelineBusy}
                   onProject={(p) => {
                     scheduleSave(p, true);
                     setSelectedId((id) => {
@@ -739,6 +747,7 @@ export function EditorPage({
         captionStyle={captionStyle}
         captionAvoidFaces={captionAvoidFaces}
         captionAnchorTrack={captionAnchorTrack}
+        onBusyChange={setPipelineBusy}
         onPreviewVertical={(opts) => {
           setPreviewVertical(true);
           setVerticalMode(opts.mode);
