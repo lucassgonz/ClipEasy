@@ -817,6 +817,18 @@ textarea {
   display: block;
 }
 
+/* Hide embedded soft-subs from the media file (Safari/Chrome). */
+.preview-stage video::cue,
+.preview-stage video::-webkit-media-text-track-display,
+.preview-stage video::-webkit-media-text-track-container {
+  display: none !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  color: transparent !important;
+  background: transparent !important;
+  font-size: 0 !important;
+}
+
 .preview-stage-9x16 .preview-fg-cover {
   position: absolute;
   inset: 0;

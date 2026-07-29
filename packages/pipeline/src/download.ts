@@ -1,6 +1,33 @@
-import { readdir } from "node:fs/promises";
+import { readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
-import { runCommand } from "./binaries.js";
+import { mustRun, runCommand } from "./binaries.js";
+
+/** Remux video without subtitle/data tracks (avoids double captions in preview). */
+export async function stripMediaSubtitles(filePath: string): Promise<void> {
+  const ext = path.extname(filePath) || ".mp4";
+  const tmp = `${filePath}.nosubs${ext}`;
+  try {
+    await mustRun("ffmpeg", [
+      "-y",
+      "-i",
+      filePath,
+      "-map",
+      "0:v:0?",
+      "-map",
+      "0:a:0?",
+      "-c",
+      "copy",
+      "-sn",
+      "-dn",
+      tmp,
+    ]);
+    await rm(filePath, { force: true });
+    await rename(tmp, filePath);
+  } catch {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    // Keep original if remux fails (e.g. odd codecs).
+  }
+}
 
 export async function downloadYoutube(
   url: string,
@@ -18,6 +45,8 @@ export async function downloadYoutube(
       "-o",
       outTemplate,
       "--no-playlist",
+      "--no-write-subs",
+      "--no-write-auto-subs",
       "--newline",
       url,
     ],
@@ -40,5 +69,8 @@ export async function downloadYoutube(
   if (!source) {
     throw new Error("Download concluído, mas o arquivo de origem não foi encontrado");
   }
-  return path.join(outputDir, source);
+  const full = path.join(outputDir, source);
+  onProgress?.("Removendo legendas embutidas do arquivo…");
+  await stripMediaSubtitles(full);
+  return full;
 }

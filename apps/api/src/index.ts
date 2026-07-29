@@ -19,6 +19,7 @@ import {
   probeImageSize,
   recomputeDuration,
   sliceClipsEverySeconds,
+  stripMediaSubtitles,
   type CaptionCue,
   type ImageAspect,
   type ImageCropBox,
@@ -366,10 +367,33 @@ async function ensureWhisperCaptions(
     ];
   });
 
+  // Drop near-duplicate cues (same text / nearly same start) from chunk boundaries.
+  const deduped: CaptionCue[] = [];
+  const sorted = [...mapped].sort((a, b) => a.startMs - b.startMs);
+  for (const cue of sorted) {
+    const prev = deduped[deduped.length - 1];
+    if (
+      prev &&
+      prev.text === cue.text &&
+      Math.abs(prev.startMs - cue.startMs) < 250
+    ) {
+      prev.endMs = Math.max(prev.endMs, cue.endMs);
+      continue;
+    }
+    // Trim overlap so two chunks never paint at once.
+    if (prev && cue.startMs < prev.endMs) {
+      const mid = Math.round((prev.endMs + cue.startMs) / 2);
+      if (mid > prev.startMs + 40) prev.endMs = mid;
+      if (cue.endMs > mid + 40) cue.startMs = mid;
+      else continue;
+    }
+    deduped.push(cue);
+  }
+
   const next = structuredClone(timeline);
   const captions = next.tracks.find((t) => t.type === "captions");
   if (captions && captions.type === "captions") {
-    captions.cues = mapped;
+    captions.cues = deduped;
   }
   next.durationMs = recomputeDuration(next);
   void rm(wdir, { recursive: true, force: true }).catch(() => undefined);
@@ -645,6 +669,7 @@ app.post<{ Params: { id: string } }>(
         path.basename(file.filename).replace(/[^\w.\-()+ ]/g, "_") || "media.mp4";
       const dest = path.join(dir, safeName);
       await pipeline(file.file, createWriteStream(dest));
+      await stripMediaSubtitles(dest);
 
       const durationSec = await probeDurationSeconds(dest);
       const durationMs = Math.round(durationSec * 1000);

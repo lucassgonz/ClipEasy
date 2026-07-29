@@ -104,7 +104,19 @@ export async function mustRun(
 ): Promise<{ stdout: string; stderr: string }> {
   const result = await runCommand(cmd, args, onStderr);
   if (result.code !== 0) {
-    throw new Error(`${cmd} falhou: ${result.stderr || result.stdout}`);
+    const raw = (result.stderr || result.stdout || "").trim();
+    const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
+    const useful = lines.filter(
+      (l) =>
+        /error|invalid|failed|not found|no such|denied|unable|cannot|option/i.test(
+          l,
+        ) && !/^ffmpeg version/i.test(l),
+    );
+    const summary =
+      useful.slice(-6).join(" · ") ||
+      lines.slice(-8).join(" · ") ||
+      `código ${result.code}`;
+    throw new Error(`${cmd} falhou: ${summary}`);
   }
   return result;
 }

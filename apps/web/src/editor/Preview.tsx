@@ -27,26 +27,40 @@ const CAPTION_STYLES: Array<{ id: CaptionStyleId; label: string }> = [
   { id: "clean", label: "Clean" },
 ];
 
-/** Visible caption text: sliding ~3-word window synced to playhead inside the cue. */
+/** Visible caption text: non-overlapping groups of ~3 words synced to playhead. */
 function syncedCaptionText(
   text: string,
   startMs: number,
   endMs: number,
   timeMs: number,
-  windowSize = 3,
+  groupSize = 3,
 ): string {
   const words = text.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return "";
-  if (words.length <= windowSize) return words.join(" ");
+  const size = Math.max(1, groupSize);
+  if (words.length <= size) return words.join(" ");
+  const groups = Math.ceil(words.length / size);
   const span = Math.max(1, endMs - startMs);
-  const t = Math.min(1, Math.max(0, (timeMs - startMs) / span));
-  // Advance one word at a time through the cue.
-  const spoken = Math.min(
-    words.length,
-    Math.max(1, Math.ceil(t * words.length)),
+  const t = Math.min(0.999, Math.max(0, (timeMs - startMs) / span));
+  const groupIndex = Math.min(groups - 1, Math.floor(t * groups));
+  const from = groupIndex * size;
+  return words.slice(from, from + size).join(" ");
+}
+
+function pickActiveCue(
+  cues: CaptionCue[],
+  timeMs: number,
+): CaptionCue | null {
+  const active = cues.filter(
+    (c) => c.text.trim() && timeMs >= c.startMs && timeMs < c.endMs,
   );
-  const from = Math.max(0, spoken - windowSize);
-  return words.slice(from, spoken).join(" ");
+  if (active.length === 0) return null;
+  // Prefer the most specific (shortest) cue when several overlap.
+  active.sort(
+    (a, b) =>
+      a.endMs - a.startMs - (b.endMs - b.startMs) || b.startMs - a.startMs,
+  );
+  return active[0] ?? null;
 }
 
 export function Preview({
@@ -111,9 +125,7 @@ export function Preview({
   const cue = useMemo(() => {
     const track = timeline.tracks.find((t) => t.type === "captions");
     if (!track || track.type !== "captions") return null;
-    return (
-      track.cues.find((c) => timeMs >= c.startMs && timeMs < c.endMs) ?? null
-    );
+    return pickActiveCue(track.cues, timeMs);
   }, [timeline, timeMs]);
 
   const sortedClips = useMemo(() => {
@@ -172,6 +184,14 @@ export function Preview({
     };
   }, [clip?.assetId, projectId]);
 
+  function disableEmbeddedTextTracks(el: HTMLVideoElement | null) {
+    if (!el) return;
+    const tracks = el.textTracks;
+    for (let i = 0; i < tracks.length; i += 1) {
+      tracks[i]!.mode = "disabled";
+    }
+  }
+
   function syncMedia(el: HTMLVideoElement | null) {
     if (!el || !clip) return;
     const speed = clipSpeed(clip);
@@ -181,7 +201,30 @@ export function Preview({
       el.currentTime = Math.max(0, local);
     }
     el.playbackRate = speed;
+    disableEmbeddedTextTracks(el);
   }
+
+  // Keep file soft-subs off (Safari often re-enables them on load / seek).
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const kill = () => disableEmbeddedTextTracks(el);
+    kill();
+    el.addEventListener("loadedmetadata", kill);
+    el.addEventListener("loadeddata", kill);
+    el.addEventListener("play", kill);
+    el.textTracks.addEventListener("addtrack", kill);
+    el.textTracks.addEventListener("change", kill);
+    const poll = window.setInterval(kill, 1000);
+    return () => {
+      el.removeEventListener("loadedmetadata", kill);
+      el.removeEventListener("loadeddata", kill);
+      el.removeEventListener("play", kill);
+      el.textTracks.removeEventListener("addtrack", kill);
+      el.textTracks.removeEventListener("change", kill);
+      window.clearInterval(poll);
+    };
+  }, [blobUrl]);
 
   useEffect(() => {
     const el = videoRef.current;
@@ -304,6 +347,24 @@ export function Preview({
     ? syncedCaptionText(cue.text, cue.startMs, cue.endMs, timeMs, 3)
     : "";
 
+  const captionOverlayRef = useRef<HTMLDivElement>(null);
+  const lastCaptionText = useRef("");
+
+  useEffect(() => {
+    if (!captionDisplay) {
+      lastCaptionText.current = "";
+      return;
+    }
+    if (captionDisplay === lastCaptionText.current) return;
+    lastCaptionText.current = captionDisplay;
+    const el = captionOverlayRef.current;
+    if (!el) return;
+    el.classList.remove("caption-anim");
+    // Restart pop animation without remounting (avoids a double-draw flash).
+    void el.offsetWidth;
+    el.classList.add("caption-anim");
+  }, [captionDisplay]);
+
   // Live face check so preview reacts even before a full auto-enquadrar pass.
   useEffect(() => {
     if (!captionAvoidFaces || !cue) {
@@ -361,6 +422,9 @@ export function Preview({
               }
               src={blobUrl}
               playsInline
+              disableRemotePlayback
+              onLoadedMetadata={(e) => disableEmbeddedTextTracks(e.currentTarget)}
+              onLoadedData={(e) => disableEmbeddedTextTracks(e.currentTarget)}
               onTimeUpdate={onVideoTimeUpdate}
               onEnded={() => {
                 const active = clipRef.current;
@@ -382,14 +446,14 @@ export function Preview({
               : "Importe um vídeo para começar"}
           </div>
         )}
-        {cue && captionDisplay && (
+        {cue && captionDisplay ? (
           <div
-            key={`${cue.id}:${captionDisplay}`}
-            className={`caption-overlay caption-style-${captionStyle} caption-place-${captionPlace} caption-anim`}
+            ref={captionOverlayRef}
+            className={`caption-overlay caption-style-${captionStyle} caption-place-${captionPlace}`}
           >
             {captionDisplay}
           </div>
-        )}
+        ) : null}
       </div>
 
       <div className="preview-controls">

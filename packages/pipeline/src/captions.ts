@@ -170,7 +170,7 @@ export function expandCuesToWordGroups(
 
 /** ASS pop-in: slight overscale then settle + short fade. */
 function assAnimTags(): string {
-  return "{\\fad(90,70)\\t(0,140,\\fscx118\\fscy118)\\t(140,260,\\fscx100\\fscy100)}";
+  return "\\fad(90,70)\\t(0,140,\\fscx118\\fscy118)\\t(140,260,\\fscx100\\fscy100)";
 }
 
 /** ASS style tuned for play resolution + caption look. */
@@ -198,7 +198,20 @@ export function cuesToAss(
   const marginLR = Math.round(px * params.marginRatioLR);
   const marginV = Math.round(py * params.marginRatioV);
   const useAnchors = Boolean(opts.avoidFaces && opts.anchorTrack?.length);
-  const synced = expandCuesToWordGroups(cues, 3);
+  const synced = expandCuesToWordGroups(cues, 3).sort(
+    (a, b) => a.startMs - b.startMs,
+  );
+  // Ensure no overlapping dialogues (libass would draw both = "duplicated" look).
+  for (let i = 1; i < synced.length; i += 1) {
+    const prev = synced[i - 1]!;
+    const cur = synced[i]!;
+    if (cur.startMs < prev.endMs) {
+      const mid = Math.round((prev.endMs + cur.startMs) / 2);
+      if (mid > prev.startMs + 40) prev.endMs = mid;
+      cur.startMs = Math.max(cur.startMs, mid);
+    }
+  }
+  const clean = synced.filter((c) => c.endMs > c.startMs + 40);
 
   const header = `[Script Info]
 Title: clipEasy
@@ -216,15 +229,15 @@ Style: Default,${params.font},${fontSize},${params.primary},&H000000FF,${params.
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-  const events = synced
+  const events = clean
     .filter((c) => c.text.trim() && c.endMs > c.startMs)
     .map((c) => {
       const mid = (c.startMs + c.endMs) / 2;
       const place = useAnchors
         ? interpolateAnchor(opts.anchorTrack, mid)
         : "bottom";
-      const align = place === "top" ? "{\\an8}" : "{\\an2}";
-      const text = `${align}${assAnimTags()}${escapeAss(c.text.trim())}`;
+      const align = place === "top" ? "\\an8" : "\\an2";
+      const text = `{${align}${assAnimTags()}}${escapeAss(c.text.trim())}`;
       return `Dialogue: 0,${msToAssTime(c.startMs)},${msToAssTime(c.endMs)},Default,,0,0,0,,${text}`;
     })
     .join("\n");

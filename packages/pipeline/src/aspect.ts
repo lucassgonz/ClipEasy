@@ -56,7 +56,7 @@ function escExpr(expr: string): string {
 }
 
 /**
- * Piecewise-linear focus(t) for ffmpeg crop eval=frame.
+ * Piecewise-linear focus(t) for ffmpeg crop x expression (uses `t`).
  * `t` is seconds from the start of the input being cropped.
  */
 export function buildCropFocusExpr(
@@ -188,14 +188,14 @@ export async function exportVertical(
 
   const useTrack = cropFocusTrack && cropFocusTrack.length > 0;
   const xExpr = useTrack
-    ? `(iw-${width})*(${escExpr(buildCropFocusExpr(cropFocusTrack, focus))})`
+    ? `(iw-${width})*(${escExpr(buildCropFocusExpr(cropFocusTrack!, focus))})`
     : `(iw-${width})*${focus.toFixed(4)}`;
 
+  // Note: some static ffmpeg builds (e.g. 6.0) have no crop `eval=` option;
+  // x/y expressions are still timeline-evaluated when they reference `t`.
   const filter = [
     `scale=${width}:${height}:force_original_aspect_ratio=increase`,
-    useTrack
-      ? `crop=${width}:${height}:${xExpr}:(ih-${height})/2:eval=frame`
-      : `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
+    `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
     "setsar=1",
   ].join(",");
 
