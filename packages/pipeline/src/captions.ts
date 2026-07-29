@@ -20,7 +20,7 @@ function msToAssTime(ms: number): string {
 
 export function cuesToAss(cues: CaptionCue[]): string {
   const header = `[Script Info]
-Title: ClipFacil
+Title: clipEasy
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920

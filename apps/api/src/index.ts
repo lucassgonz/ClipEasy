@@ -393,8 +393,13 @@ app.post<{ Params: { id: string } }>(
         exportHorizontal?: boolean;
         exportVertical?: boolean;
         verticalMode?: "crop" | "blur";
+        cropFocusX?: number;
         resolution?: "720p" | "1080p" | "1440p" | "2160p";
         burnCaptions?: boolean;
+        fps?: number;
+        format?: "mp4" | "mov";
+        quality?: "low" | "medium" | "high" | "max";
+        audioBitrate?: "128k" | "192k" | "320k";
       };
 
       const jobId = nanoid(8);
@@ -838,4 +843,4 @@ Transcrição:
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";
 await app.listen({ port, host });
-console.log(`ClipFácil API em http://${host}:${port}`);
+console.log(`clipEasy API em http://${host}:${port}`);

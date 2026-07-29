@@ -44,7 +44,7 @@ export function ProjectList({
     <div className="projects-page">
       <header className="projects-head">
         <div>
-          <h1 className="brand">ClipFácil</h1>
+          <h1 className="brand">clipEasy</h1>
           <p className="tagline">Vídeos e fotos para YouTube — no seu PC</p>
         </div>
         <button

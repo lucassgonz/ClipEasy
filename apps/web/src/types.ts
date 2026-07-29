@@ -8,6 +8,11 @@ export interface VideoClip {
   outMs: number;
   transitionIn?: TransitionType;
   transitionMs?: number;
+  /** Playback rate; 1 = normal. Timeline duration = source / speed. */
+  speed?: number;
+  /** 0–1 linear gain; default 1 */
+  volume?: number;
+  muted?: boolean;
 }
 
 export interface AudioClip {
@@ -16,6 +21,8 @@ export interface AudioClip {
   timelineStartMs: number;
   inMs: number;
   outMs: number;
+  speed?: number;
+  volume?: number;
   muted?: boolean;
 }
 
@@ -74,6 +81,8 @@ export interface Timeline {
 
 export type ProjectKind = "video" | "image";
 export type Resolution = "720p" | "1080p" | "1440p" | "2160p";
+export type ExportQuality = "low" | "medium" | "high" | "max";
+export type ExportFormat = "mp4" | "mov";
 
 export interface YoutubeMeta {
   titles: string[];
@@ -118,8 +127,40 @@ export interface ExportJob {
   error?: string;
 }
 
-export function clipDurationMs(clip: { inMs: number; outMs: number }): number {
+export interface ExportOptions {
+  exportHorizontal?: boolean;
+  exportVertical?: boolean;
+  verticalMode?: "crop" | "blur";
+  /** 0 = left, 0.5 = center, 1 = right */
+  cropFocusX?: number;
+  resolution?: Resolution;
+  burnCaptions?: boolean;
+  fps?: number;
+  format?: ExportFormat;
+  quality?: ExportQuality;
+  audioBitrate?: "128k" | "192k" | "320k";
+}
+
+/** Source media span (ignores speed). */
+export function clipSourceDurationMs(clip: {
+  inMs: number;
+  outMs: number;
+}): number {
   return Math.max(0, clip.outMs - clip.inMs);
+}
+
+/** Timeline duration accounting for speed. */
+export function clipDurationMs(clip: {
+  inMs: number;
+  outMs: number;
+  speed?: number;
+}): number {
+  const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+  return Math.round(clipSourceDurationMs(clip) / speed);
+}
+
+export function clipSpeed(clip: { speed?: number }): number {
+  return clip.speed && clip.speed > 0 ? clip.speed : 1;
 }
 
 export function findActiveVideoClip(
@@ -146,5 +187,13 @@ export function recomputeDuration(timeline: Timeline): number {
       max = Math.max(max, clip.timelineStartMs + clipDurationMs(clip));
     }
   }
-  return max;
+  return Math.round(max);
+}
+
+export function formatTimecode(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  const cs = Math.floor((ms % 1000) / 10);
+  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }

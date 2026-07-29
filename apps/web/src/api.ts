@@ -1,11 +1,11 @@
 import type {
   ExportJob,
+  ExportOptions,
   HealthReport,
   ImageStudioState,
   Project,
   ProjectKind,
   ProjectMetadata,
-  Resolution,
   Timeline,
   YoutubeMeta,
 } from "./types";
@@ -177,13 +177,7 @@ export async function suggestYoutube(
 
 export async function startExport(
   projectId: string,
-  options: {
-    exportHorizontal?: boolean;
-    exportVertical?: boolean;
-    verticalMode?: "crop" | "blur";
-    resolution?: Resolution;
-    burnCaptions?: boolean;
-  },
+  options: ExportOptions,
 ): Promise<string> {
   const res = await fetch(`${API}/projects/${projectId}/export`, {
     method: "POST",

@@ -41,6 +41,7 @@ export function ImageStudio({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
   const drag = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -114,7 +115,7 @@ export function ImageStudio({
           ← Projetos
         </button>
         <div className="editor-title">
-          <span className="brand-mini">ClipFácil</span>
+          <span className="brand-mini">clipEasy</span>
           <input
             className="title-input"
             value={project?.title ?? ""}
@@ -189,23 +190,30 @@ export function ImageStudio({
 
         <aside className="side-panel">
           <h2>Importar foto</h2>
-          <label className="field">
+          <div className="field">
             <span>Arquivo</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (!file || !project) return;
-                setBusy("Upload");
-                setError(null);
-                void uploadImage(project.id, file)
-                  .then(setProject)
-                  .catch((err: Error) => setError(err.message))
-                  .finally(() => setBusy(null));
-              }}
-            />
-          </label>
+            <label className="file-pick">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file || !project) return;
+                  setFileName(file.name);
+                  setBusy("Upload");
+                  setError(null);
+                  void uploadImage(project.id, file)
+                    .then(setProject)
+                    .catch((err: Error) => setError(err.message))
+                    .finally(() => setBusy(null));
+                }}
+              />
+              <span className="file-pick-btn">Escolher arquivo</span>
+              <span className="file-pick-name">
+                {fileName ?? "Nenhum arquivo selecionado"}
+              </span>
+            </label>
+          </div>
 
           <h2>Proporção</h2>
           <div className="segmented">

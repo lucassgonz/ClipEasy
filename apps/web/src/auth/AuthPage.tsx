@@ -13,7 +13,7 @@ export function AuthPage({ onAuthed }: { onAuthed: () => void }) {
     return (
       <div className="auth-page">
         <div className="auth-card">
-          <h1 className="brand">ClipFácil</h1>
+          <h1 className="brand">clipEasy</h1>
           <p className="tagline">
             Modo desenvolvimento (sem Supabase). Clique para entrar.
           </p>
@@ -43,7 +43,7 @@ export function AuthPage({ onAuthed }: { onAuthed: () => void }) {
   return (
     <div className="auth-page">
       <div className="auth-card">
-        <h1 className="brand">ClipFácil</h1>
+        <h1 className="brand">clipEasy</h1>
         <p className="tagline">
           Editor local com timeline, legendas e a sua conta.
         </p>

@@ -1,5 +1,24 @@
 export type Resolution = "720p" | "1080p" | "1440p" | "2160p";
 export type VerticalMode = "crop" | "blur";
+export type ExportQuality = "low" | "medium" | "high" | "max";
+export type ExportFormat = "mp4" | "mov";
+
+export function qualitySettings(quality: ExportQuality = "high"): {
+  crf: number;
+  preset: string;
+} {
+  switch (quality) {
+    case "low":
+      return { crf: 28, preset: "veryfast" };
+    case "medium":
+      return { crf: 23, preset: "faster" };
+    case "max":
+      return { crf: 17, preset: "medium" };
+    case "high":
+    default:
+      return { crf: 20, preset: "fast" };
+  }
+}
 
 export interface JobOptions {
   trimStartSeconds?: number;

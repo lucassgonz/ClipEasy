@@ -158,7 +158,9 @@ export async function updateProject(
       }
     : existing.timeline;
 
-  const duration_ms = timeline.durationMs ?? recomputeDuration(timeline);
+  const duration_ms = Math.round(
+    timeline.durationMs ?? recomputeDuration(timeline),
+  );
   const title = patch.title ?? existing.title;
   const metadata = patch.metadata ?? existing.metadata ?? {};
   const now = new Date().toISOString();

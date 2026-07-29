@@ -4,31 +4,11 @@ import {
   importYoutube,
   recipeSplit,
   recipeSilence,
-  startExport,
-  fetchExportJob,
-  exportFileUrl,
   uploadAsset,
   suggestYoutube,
   saveProject,
 } from "../api";
-import { getSession } from "../lib/supabase";
-import type { ExportJob, Project, Resolution, YoutubeMeta } from "../types";
-
-async function downloadAuthed(urlPath: string, filename: string) {
-  const session = await getSession();
-  const res = await fetch(exportFileUrl(urlPath), {
-    headers: session?.access_token
-      ? { Authorization: `Bearer ${session.access_token}` }
-      : {},
-  });
-  if (!res.ok) throw new Error("Falha no download");
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
+import type { Project, YoutubeMeta } from "../types";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
@@ -37,17 +17,17 @@ async function copyText(text: string) {
 export function SidePanel({
   project,
   onProject,
+  onOpenExport,
 }: {
   project: Project;
   onProject: (p: Project) => void;
+  onOpenExport?: () => void;
 }) {
   const [url, setUrl] = useState("");
   const [splitSec, setSplitSec] = useState(60);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [exportJob, setExportJob] = useState<ExportJob | null>(null);
-  const [verticalMode, setVerticalMode] = useState<"crop" | "blur">("crop");
-  const [resolution, setResolution] = useState<Resolution>("1080p");
+  const [fileName, setFileName] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
   const youtube = project.metadata?.youtube;
@@ -98,20 +78,27 @@ export function SidePanel({
         Baixar e adicionar
       </button>
 
-      <label className="field">
+      <div className="field">
         <span>Arquivo local</span>
-        <input
-          type="file"
-          accept="video/*"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            void run("Upload", async () => {
-              onProject(await uploadAsset(project.id, file));
-            });
-          }}
-        />
-      </label>
+        <label className="file-pick">
+          <input
+            type="file"
+            accept="video/*"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              setFileName(file.name);
+              void run("Upload", async () => {
+                onProject(await uploadAsset(project.id, file));
+              });
+            }}
+          />
+          <span className="file-pick-btn">Escolher arquivo</span>
+          <span className="file-pick-name">
+            {fileName ?? "Nenhum arquivo selecionado"}
+          </span>
+        </label>
+      </div>
 
       <h2>Receitas</h2>
       <label className="field compact">
@@ -168,9 +155,9 @@ export function SidePanel({
         className="ghost"
         disabled={Boolean(busy)}
         onClick={() =>
-          void run("Metadados", async () => {
-            const { project: updated } = await suggestYoutube(project.id);
-            onProject(updated);
+          void run("YouTube meta", async () => {
+            const result = await suggestYoutube(project.id);
+            onProject(result.project);
           })
         }
       >
@@ -180,7 +167,7 @@ export function SidePanel({
       {youtube && (
         <div className="yt-box">
           <label className="field compact">
-            <span>Título</span>
+            <span>Títulos</span>
             <select
               value={youtube.selectedTitle ?? youtube.titles[0] ?? ""}
               onChange={(e) =>
@@ -198,9 +185,9 @@ export function SidePanel({
             type="button"
             className="ghost"
             onClick={() =>
-              void copyText(youtube.selectedTitle ?? youtube.titles[0] ?? "").then(
-                () => setCopied("título"),
-              )
+              void copyText(
+                youtube.selectedTitle ?? youtube.titles[0] ?? "",
+              ).then(() => setCopied("título"))
             }
           >
             Copiar título
@@ -209,7 +196,7 @@ export function SidePanel({
           <label className="field compact">
             <span>Descrição</span>
             <textarea
-              rows={5}
+              rows={4}
               value={youtube.description}
               onChange={(e) =>
                 patchYoutube({ ...youtube, description: e.target.value })
@@ -220,25 +207,14 @@ export function SidePanel({
             type="button"
             className="ghost"
             onClick={() =>
-              void copyText(youtube.description).then(() => setCopied("descrição"))
+              void copyText(youtube.description).then(() =>
+                setCopied("descrição"),
+              )
             }
           >
             Copiar descrição
           </button>
 
-          <label className="field compact">
-            <span>Hashtags</span>
-            <textarea
-              rows={2}
-              value={youtube.hashtags.join(" ")}
-              onChange={(e) =>
-                patchYoutube({
-                  ...youtube,
-                  hashtags: e.target.value.split(/\s+/).filter(Boolean),
-                })
-              }
-            />
-          </label>
           <button
             type="button"
             className="ghost"
@@ -271,7 +247,9 @@ export function SidePanel({
             type="button"
             className="ghost"
             onClick={() =>
-              void copyText(youtube.tags.join(", ")).then(() => setCopied("tags"))
+              void copyText(youtube.tags.join(", ")).then(() =>
+                setCopied("tags"),
+              )
             }
           >
             Copiar tags
@@ -281,80 +259,19 @@ export function SidePanel({
       )}
 
       <h2>Exportar</h2>
-      <label className="field compact">
-        <span>Resolução</span>
-        <select
-          value={resolution}
-          onChange={(e) => setResolution(e.target.value as Resolution)}
-        >
-          <option value="720p">720p</option>
-          <option value="1080p">1080p</option>
-          <option value="1440p">1440p</option>
-          <option value="2160p">4K (2160p)</option>
-        </select>
-      </label>
-      <label className="field compact">
-        <span>Vertical</span>
-        <select
-          value={verticalMode}
-          onChange={(e) => setVerticalMode(e.target.value as "crop" | "blur")}
-        >
-          <option value="crop">Recorte</option>
-          <option value="blur">Fundo desfocado</option>
-        </select>
-      </label>
+      <p className="hint">
+        Escolha resolução, FPS, formato, qualidade e enquadramento vertical.
+      </p>
       <button
         type="button"
         className="cta"
-        disabled={Boolean(busy)}
-        onClick={() =>
-          void run("Export", async () => {
-            const jobId = await startExport(project.id, {
-              exportHorizontal: true,
-              exportVertical: true,
-              verticalMode,
-              resolution,
-              burnCaptions: true,
-            });
-            for (;;) {
-              const job = await fetchExportJob(jobId);
-              setExportJob(job);
-              if (job.status === "done" || job.status === "error") break;
-              await new Promise((r) => setTimeout(r, 1200));
-            }
-          })
-        }
+        onClick={() => onOpenExport?.()}
       >
-        Exportar H + V
+        Abrir exportação…
       </button>
 
       {busy && <p className="progress-label">{busy}…</p>}
       {error && <p className="error">{error}</p>}
-      {exportJob && (
-        <div className="export-box">
-          <p>
-            {exportJob.progress.step} — {exportJob.progress.percent}%
-          </p>
-          {exportJob.error && <p className="error">{exportJob.error}</p>}
-          <ul>
-            {exportJob.outputs.map((o) => (
-              <li key={o.name}>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() =>
-                    void downloadAuthed(o.url, o.name).catch((e: Error) =>
-                      setError(e.message),
-                    )
-                  }
-                >
-                  Baixar {o.label}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </aside>
   );
 }

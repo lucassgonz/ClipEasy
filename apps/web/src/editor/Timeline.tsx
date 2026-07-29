@@ -10,6 +10,10 @@ import {
 
 const PX_PER_MS_BASE = 0.08;
 
+function roundMs(n: number): number {
+  return Math.max(0, Math.round(n));
+}
+
 export function TimelineView({
   timeline,
   timeMs,
@@ -17,6 +21,7 @@ export function TimelineView({
   onSelect,
   onChange,
   onSeek,
+  onSplit,
 }: {
   timeline: Timeline;
   timeMs: number;
@@ -24,42 +29,65 @@ export function TimelineView({
   onSelect: (id: string | null) => void;
   onChange: (timeline: Timeline) => void;
   onSeek: (ms: number) => void;
+  onSplit?: () => void;
 }) {
   const [zoom, setZoom] = useState(1);
   const pxPerMs = PX_PER_MS_BASE * zoom;
   const width = Math.max(800, (timeline.durationMs || 10000) * pxPerMs + 200);
   const railRef = useRef<HTMLDivElement>(null);
+  const scrubbing = useRef(false);
+  const timelineRef = useRef(timeline);
+  timelineRef.current = timeline;
+
+  const dragBase = useRef<{
+    id: string;
+    kind: "move" | "in" | "out" | "cue";
+    timelineStartMs: number;
+    inMs: number;
+    outMs: number;
+    startMs?: number;
+    endMs?: number;
+  } | null>(null);
 
   const video = timeline.tracks.find((t) => t.type === "video");
   const audio = timeline.tracks.find((t) => t.type === "audio");
   const captions = timeline.tracks.find((t) => t.type === "captions");
 
-  function seekFromEvent(clientX: number) {
+  function msFromClientX(clientX: number): number {
     const el = railRef.current;
-    if (!el) return;
+    if (!el) return 0;
     const rect = el.getBoundingClientRect();
     const x = clientX - rect.left + el.scrollLeft;
-    onSeek(Math.max(0, x / pxPerMs));
+    return roundMs(Math.max(0, x / pxPerMs));
   }
 
-  function updateVideoClips(clips: VideoClip[]) {
+  function commitVideoClips(clips: VideoClip[]) {
+    const normalized = clips.map((c) => ({
+      ...c,
+      timelineStartMs: roundMs(c.timelineStartMs),
+      inMs: roundMs(c.inMs),
+      outMs: roundMs(c.outMs),
+    }));
+    const base = timelineRef.current;
     const next: Timeline = {
-      ...timeline,
-      tracks: timeline.tracks.map((t) =>
-        t.type === "video" ? { ...t, clips } : t,
+      ...base,
+      tracks: base.tracks.map((t) =>
+        t.type === "video" ? { ...t, clips: normalized } : t,
       ),
     };
-    // mirror audio
     next.tracks = next.tracks.map((t) =>
       t.type === "audio"
         ? {
             ...t,
-            clips: clips.map((c) => ({
+            clips: normalized.map((c) => ({
               id: `${c.id}-a`,
               assetId: c.assetId,
               timelineStartMs: c.timelineStartMs,
               inMs: c.inMs,
               outMs: c.outMs,
+              speed: c.speed,
+              volume: c.volume,
+              muted: c.muted,
             })),
           }
         : t,
@@ -68,74 +96,119 @@ export function TimelineView({
     onChange(next);
   }
 
-  function updateCues(cues: CaptionCue[]) {
+  function commitCues(cues: CaptionCue[]) {
+    const base = timelineRef.current;
     const next: Timeline = {
-      ...timeline,
-      tracks: timeline.tracks.map((t) =>
-        t.type === "captions" ? { ...t, cues } : t,
+      ...base,
+      tracks: base.tracks.map((t) =>
+        t.type === "captions"
+          ? {
+              ...t,
+              cues: cues.map((c) => ({
+                ...c,
+                startMs: roundMs(c.startMs),
+                endMs: roundMs(c.endMs),
+              })),
+            }
+          : t,
       ),
     };
     next.durationMs = recomputeDuration(next);
     onChange(next);
   }
 
+  function currentVideoClips(): VideoClip[] {
+    const t = timelineRef.current.tracks.find((x) => x.type === "video");
+    return t && t.type === "video" ? t.clips : [];
+  }
+
+  function currentCues(): CaptionCue[] {
+    const t = timelineRef.current.tracks.find((x) => x.type === "captions");
+    return t && t.type === "captions" ? t.cues : [];
+  }
+
   function splitAtPlayhead() {
-    if (!video || video.type !== "video") return;
-    const clips = structuredClone(video.clips);
+    if (onSplit) {
+      onSplit();
+      return;
+    }
+    const clips = structuredClone(currentVideoClips());
     const idx = clips.findIndex((c) => {
       const end = c.timelineStartMs + clipDurationMs(c);
       return timeMs > c.timelineStartMs + 50 && timeMs < end - 50;
     });
     if (idx < 0) return;
     const c = clips[idx]!;
-    const local = timeMs - c.timelineStartMs + c.inMs;
+    const speed = c.speed && c.speed > 0 ? c.speed : 1;
+    const local = roundMs(c.inMs + (timeMs - c.timelineStartMs) * speed);
     const left: VideoClip = { ...c, outMs: local };
     const right: VideoClip = {
       ...c,
-      id: `${c.id}-r`,
-      timelineStartMs: timeMs,
+      id: `${c.id}-r-${Date.now()}`,
+      timelineStartMs: roundMs(timeMs),
       inMs: local,
       transitionIn: "cut",
     };
     clips.splice(idx, 1, left, right);
-    updateVideoClips(clips);
+    commitVideoClips(clips);
   }
 
   function setTransition(id: string, transitionIn: TransitionType) {
-    if (!video || video.type !== "video") return;
-    updateVideoClips(
-      video.clips.map((c) => (c.id === id ? { ...c, transitionIn } : c)),
-    );
-  }
-
-  function onDragClip(id: string, deltaMs: number) {
-    if (!video || video.type !== "video") return;
-    updateVideoClips(
-      video.clips.map((c) =>
-        c.id === id
-          ? { ...c, timelineStartMs: Math.max(0, c.timelineStartMs + deltaMs) }
-          : c,
+    commitVideoClips(
+      currentVideoClips().map((c) =>
+        c.id === id ? { ...c, transitionIn } : c,
       ),
     );
   }
 
-  function trimClip(id: string, edge: "in" | "out", deltaMs: number) {
-    if (!video || video.type !== "video") return;
-    updateVideoClips(
-      video.clips.map((c) => {
-        if (c.id !== id) return c;
-        if (edge === "in") {
-          const inMs = Math.min(c.outMs - 100, Math.max(0, c.inMs + deltaMs));
-          const shift = inMs - c.inMs;
+  function applyDragDelta(totalDxPx: number) {
+    const base = dragBase.current;
+    if (!base) return;
+    const deltaMs = totalDxPx / pxPerMs;
+
+    if (base.kind === "cue") {
+      const dur = (base.endMs ?? 0) - (base.startMs ?? 0);
+      const startMs = Math.max(0, roundMs((base.startMs ?? 0) + deltaMs));
+      commitCues(
+        currentCues().map((cue) =>
+          cue.id === base.id
+            ? { ...cue, startMs, endMs: startMs + Math.max(100, dur) }
+            : cue,
+        ),
+      );
+      return;
+    }
+
+    commitVideoClips(
+      currentVideoClips().map((c) => {
+        if (c.id !== base.id) return c;
+        if (base.kind === "move") {
+          return {
+            ...c,
+            timelineStartMs: Math.max(
+              0,
+              roundMs(base.timelineStartMs + deltaMs),
+            ),
+          };
+        }
+        if (base.kind === "in") {
+          const inMs = Math.min(
+            base.outMs - 100,
+            Math.max(0, roundMs(base.inMs + deltaMs)),
+          );
+          const shift = inMs - base.inMs;
           return {
             ...c,
             inMs,
-            timelineStartMs: c.timelineStartMs + shift,
+            timelineStartMs: Math.max(
+              0,
+              roundMs(base.timelineStartMs + shift),
+            ),
           };
         }
         return {
           ...c,
-          outMs: Math.max(c.inMs + 100, c.outMs + deltaMs),
+          outMs: Math.max(base.inMs + 100, roundMs(base.outMs + deltaMs)),
         };
       }),
     );
@@ -145,6 +218,11 @@ export function TimelineView({
     if (!captions || captions.type !== "captions" || !selectedId) return null;
     return captions.cues.find((c) => c.id === selectedId) ?? null;
   }, [captions, selectedId]);
+
+  const selectedVideo =
+    video && video.type === "video"
+      ? video.clips.find((c) => c.id === selectedId)
+      : undefined;
 
   return (
     <div className="timeline">
@@ -163,15 +241,16 @@ export function TimelineView({
             onChange={(e) => setZoom(Number(e.target.value))}
           />
         </label>
-        {selectedId && video && video.type === "video" && video.clips.some((c) => c.id === selectedId) && (
+        {selectedVideo && (
           <label>
             Transição
             <select
-              value={
-                video.clips.find((c) => c.id === selectedId)?.transitionIn ?? "cut"
-              }
+              value={selectedVideo.transitionIn ?? "cut"}
               onChange={(e) =>
-                setTransition(selectedId, e.target.value as TransitionType)
+                setTransition(
+                  selectedVideo.id,
+                  e.target.value as TransitionType,
+                )
               }
             >
               <option value="cut">Corte</option>
@@ -182,81 +261,113 @@ export function TimelineView({
         )}
       </div>
 
-      <div
-        className="timeline-rail"
-        ref={railRef}
-        onClick={(e) => seekFromEvent(e.clientX)}
-      >
-        <div className="timeline-inner" style={{ width }}>
-          <div
-            className="playhead"
-            style={{ left: timeMs * pxPerMs }}
-          />
+      <div className="timeline-body">
+        <div className="track-labels-col">
+          <div className="track-label">Vídeo</div>
+          <div className="track-label">Áudio</div>
+          <div className="track-label">Legendas</div>
+        </div>
 
-          <TrackRow label="Vídeo">
-            {video &&
-              video.type === "video" &&
-              video.clips.map((c) => (
-                <ClipBlock
-                  key={c.id}
-                  left={c.timelineStartMs * pxPerMs}
-                  width={clipDurationMs(c) * pxPerMs}
-                  selected={selectedId === c.id}
-                  label={timeline.assets[c.assetId]?.filename ?? c.assetId}
-                  color="video"
-                  onSelect={() => onSelect(c.id)}
-                  onDrag={(dx) => onDragClip(c.id, dx / pxPerMs)}
-                  onTrimIn={(dx) => trimClip(c.id, "in", dx / pxPerMs)}
-                  onTrimOut={(dx) => trimClip(c.id, "out", dx / pxPerMs)}
-                />
-              ))}
-          </TrackRow>
+        <div
+          className="timeline-rail"
+          ref={railRef}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            if ((e.target as HTMLElement).closest(".clip")) return;
+            scrubbing.current = true;
+            e.currentTarget.setPointerCapture(e.pointerId);
+            onSeek(msFromClientX(e.clientX));
+          }}
+          onPointerMove={(e) => {
+            if (!scrubbing.current) return;
+            onSeek(msFromClientX(e.clientX));
+          }}
+          onPointerUp={() => {
+            scrubbing.current = false;
+          }}
+          onPointerCancel={() => {
+            scrubbing.current = false;
+          }}
+        >
+          <div className="timeline-inner" style={{ width }}>
+            <div className="playhead" style={{ left: timeMs * pxPerMs }} />
 
-          <TrackRow label="Áudio">
-            {audio &&
-              audio.type === "audio" &&
-              audio.clips.map((c) => (
-                <ClipBlock
-                  key={c.id}
-                  left={c.timelineStartMs * pxPerMs}
-                  width={clipDurationMs(c) * pxPerMs}
-                  selected={false}
-                  label="áudio"
-                  color="audio"
-                  onSelect={() => undefined}
-                />
-              ))}
-          </TrackRow>
+            <div className="track-lane">
+              {video &&
+                video.type === "video" &&
+                video.clips.map((c) => (
+                  <ClipBlock
+                    key={c.id}
+                    left={c.timelineStartMs * pxPerMs}
+                    width={clipDurationMs(c) * pxPerMs}
+                    selected={selectedId === c.id}
+                    label={timeline.assets[c.assetId]?.filename ?? c.assetId}
+                    color="video"
+                    onSelect={() => onSelect(c.id)}
+                    onGestureStart={(kind) => {
+                      dragBase.current = {
+                        id: c.id,
+                        kind,
+                        timelineStartMs: c.timelineStartMs,
+                        inMs: c.inMs,
+                        outMs: c.outMs,
+                      };
+                    }}
+                    onGestureDelta={applyDragDelta}
+                    onGestureEnd={() => {
+                      dragBase.current = null;
+                    }}
+                  />
+                ))}
+            </div>
 
-          <TrackRow label="Legendas">
-            {captions &&
-              captions.type === "captions" &&
-              captions.cues.map((c) => (
-                <ClipBlock
-                  key={c.id}
-                  left={c.startMs * pxPerMs}
-                  width={Math.max(8, (c.endMs - c.startMs) * pxPerMs)}
-                  selected={selectedId === c.id}
-                  label={c.text.slice(0, 24)}
-                  color="caption"
-                  onSelect={() => onSelect(c.id)}
-                  onDrag={(dx) => {
-                    const d = dx / pxPerMs;
-                    updateCues(
-                      captions.cues.map((cue) =>
-                        cue.id === c.id
-                          ? {
-                              ...cue,
-                              startMs: Math.max(0, cue.startMs + d),
-                              endMs: Math.max(cue.startMs + 100, cue.endMs + d),
-                            }
-                          : cue,
-                      ),
-                    );
-                  }}
-                />
-              ))}
-          </TrackRow>
+            <div className="track-lane">
+              {audio &&
+                audio.type === "audio" &&
+                audio.clips.map((c) => (
+                  <ClipBlock
+                    key={c.id}
+                    left={c.timelineStartMs * pxPerMs}
+                    width={clipDurationMs(c) * pxPerMs}
+                    selected={false}
+                    label="áudio"
+                    color="audio"
+                    onSelect={() => undefined}
+                  />
+                ))}
+            </div>
+
+            <div className="track-lane">
+              {captions &&
+                captions.type === "captions" &&
+                captions.cues.map((c) => (
+                  <ClipBlock
+                    key={c.id}
+                    left={c.startMs * pxPerMs}
+                    width={Math.max(8, (c.endMs - c.startMs) * pxPerMs)}
+                    selected={selectedId === c.id}
+                    label={c.text.slice(0, 24)}
+                    color="caption"
+                    onSelect={() => onSelect(c.id)}
+                    onGestureStart={() => {
+                      dragBase.current = {
+                        id: c.id,
+                        kind: "cue",
+                        timelineStartMs: 0,
+                        inMs: 0,
+                        outMs: 0,
+                        startMs: c.startMs,
+                        endMs: c.endMs,
+                      };
+                    }}
+                    onGestureDelta={applyDragDelta}
+                    onGestureEnd={() => {
+                      dragBase.current = null;
+                    }}
+                  />
+                ))}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -267,11 +378,8 @@ export function TimelineView({
             <textarea
               value={selectedCue.text}
               onChange={(e) =>
-                updateCues(
-                  (captions && captions.type === "captions"
-                    ? captions.cues
-                    : []
-                  ).map((c) =>
+                commitCues(
+                  currentCues().map((c) =>
                     c.id === selectedCue.id
                       ? { ...c, text: e.target.value }
                       : c,
@@ -286,21 +394,6 @@ export function TimelineView({
   );
 }
 
-function TrackRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="track-row">
-      <div className="track-label">{label}</div>
-      <div className="track-lane">{children}</div>
-    </div>
-  );
-}
-
 function ClipBlock({
   left,
   width,
@@ -308,9 +401,9 @@ function ClipBlock({
   label,
   color,
   onSelect,
-  onDrag,
-  onTrimIn,
-  onTrimOut,
+  onGestureStart,
+  onGestureDelta,
+  onGestureEnd,
 }: {
   left: number;
   width: number;
@@ -318,71 +411,87 @@ function ClipBlock({
   label: string;
   color: "video" | "audio" | "caption";
   onSelect: () => void;
-  onDrag?: (dx: number) => void;
-  onTrimIn?: (dx: number) => void;
-  onTrimOut?: (dx: number) => void;
+  onGestureStart?: (kind: "move" | "in" | "out") => void;
+  onGestureDelta?: (totalDxPx: number) => void;
+  onGestureEnd?: () => void;
 }) {
+  const originX = useRef(0);
+  const active = useRef(false);
+  const moved = useRef(false);
+
+  function begin(e: React.PointerEvent, kind: "move" | "in" | "out") {
+    if (!onGestureStart || !onGestureDelta) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onSelect();
+    active.current = true;
+    moved.current = false;
+    originX.current = e.clientX;
+    onGestureStart(kind);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function move(e: React.PointerEvent) {
+    if (!active.current || !onGestureDelta) return;
+    const dx = e.clientX - originX.current;
+    if (Math.abs(dx) > 2) moved.current = true;
+    onGestureDelta(dx);
+  }
+
+  function end(e: React.PointerEvent) {
+    if (!active.current) return;
+    active.current = false;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    if (moved.current) onGestureEnd?.();
+  }
+
+  const canEdit = Boolean(onGestureStart);
+  const canTrim = canEdit && color === "video";
+
   return (
     <div
       className={`clip ${color} ${selected ? "selected" : ""}`}
       style={{ left, width: Math.max(width, 8) }}
       onPointerDown={(e) => {
-        e.stopPropagation();
-        onSelect();
-        if (!onDrag) return;
-        const startX = e.clientX;
-        const move = (ev: PointerEvent) => onDrag(ev.clientX - startX);
-        const up = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", up);
-        };
-        // cumulative from origin each move - fix by tracking last
-        let last = startX;
-        const move2 = (ev: PointerEvent) => {
-          onDrag(ev.clientX - last);
-          last = ev.clientX;
-        };
-        window.addEventListener("pointermove", move2);
-        window.addEventListener("pointerup", up);
+        if (e.button !== 0) return;
+        if (!canEdit) {
+          e.stopPropagation();
+          onSelect();
+          return;
+        }
+        begin(e, "move");
       }}
+      onPointerMove={move}
+      onPointerUp={end}
+      onPointerCancel={end}
     >
-      {onTrimIn && (
+      {canTrim && (
         <span
           className="handle left"
           onPointerDown={(e) => {
-            e.stopPropagation();
-            let last = e.clientX;
-            const move = (ev: PointerEvent) => {
-              onTrimIn(ev.clientX - last);
-              last = ev.clientX;
-            };
-            const up = () => {
-              window.removeEventListener("pointermove", move);
-              window.removeEventListener("pointerup", up);
-            };
-            window.addEventListener("pointermove", move);
-            window.addEventListener("pointerup", up);
+            if (e.button !== 0) return;
+            begin(e, "in");
           }}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
         />
       )}
       <span className="clip-label">{label}</span>
-      {onTrimOut && (
+      {canTrim && (
         <span
           className="handle right"
           onPointerDown={(e) => {
-            e.stopPropagation();
-            let last = e.clientX;
-            const move = (ev: PointerEvent) => {
-              onTrimOut(ev.clientX - last);
-              last = ev.clientX;
-            };
-            const up = () => {
-              window.removeEventListener("pointermove", move);
-              window.removeEventListener("pointerup", up);
-            };
-            window.addEventListener("pointermove", move);
-            window.addEventListener("pointerup", up);
+            if (e.button !== 0) return;
+            begin(e, "out");
           }}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
         />
       )}
     </div>

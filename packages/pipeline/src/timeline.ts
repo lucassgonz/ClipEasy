@@ -8,6 +8,9 @@ export interface VideoClip {
   outMs: number;
   transitionIn?: TransitionType;
   transitionMs?: number;
+  speed?: number;
+  volume?: number;
+  muted?: boolean;
 }
 
 export interface AudioClip {
@@ -16,6 +19,8 @@ export interface AudioClip {
   timelineStartMs: number;
   inMs: number;
   outMs: number;
+  speed?: number;
+  volume?: number;
   muted?: boolean;
 }
 
@@ -85,8 +90,24 @@ export function emptyTimeline(): Timeline {
   };
 }
 
-export function clipDurationMs(clip: { inMs: number; outMs: number }): number {
+export function clipSourceDurationMs(clip: {
+  inMs: number;
+  outMs: number;
+}): number {
   return Math.max(0, clip.outMs - clip.inMs);
+}
+
+export function clipDurationMs(clip: {
+  inMs: number;
+  outMs: number;
+  speed?: number;
+}): number {
+  const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+  return Math.round(clipSourceDurationMs(clip) / speed);
+}
+
+export function clipSpeed(clip: { speed?: number }): number {
+  return clip.speed && clip.speed > 0 ? clip.speed : 1;
 }
 
 export function recomputeDuration(timeline: Timeline): number {
@@ -102,7 +123,7 @@ export function recomputeDuration(timeline: Timeline): number {
       max = Math.max(max, clip.timelineStartMs + clipDurationMs(clip));
     }
   }
-  return max;
+  return Math.round(max);
 }
 
 export function getVideoTrack(timeline: Timeline): VideoTrack {
@@ -135,4 +156,44 @@ export function findActiveVideoClip(
     if (timeMs >= clip.timelineStartMs && timeMs < end) return clip;
   }
   return null;
+}
+
+/** Mirror video clips onto the audio track (shared edit model). */
+export function mirrorAudioFromVideo(timeline: Timeline): Timeline {
+  const video = getVideoTrack(timeline);
+  return {
+    ...timeline,
+    tracks: timeline.tracks.map((t) =>
+      t.type === "audio"
+        ? {
+            ...t,
+            clips: video.clips.map((c) => ({
+              id: `${c.id}-a`,
+              assetId: c.assetId,
+              timelineStartMs: c.timelineStartMs,
+              inMs: c.inMs,
+              outMs: c.outMs,
+              speed: c.speed,
+              volume: c.volume,
+              muted: c.muted,
+            })),
+          }
+        : t,
+    ),
+  };
+}
+
+export function withVideoClips(
+  timeline: Timeline,
+  clips: VideoClip[],
+): Timeline {
+  const next: Timeline = {
+    ...timeline,
+    tracks: timeline.tracks.map((t) =>
+      t.type === "video" ? { ...t, clips } : t,
+    ),
+  };
+  const mirrored = mirrorAudioFromVideo(next);
+  mirrored.durationMs = recomputeDuration(mirrored);
+  return mirrored;
 }

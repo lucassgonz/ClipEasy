@@ -1,15 +1,22 @@
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { writeAssFile } from "./captions.js";
 import { mustRun } from "./binaries.js";
 import {
   clipDurationMs,
+  clipSpeed,
   getCaptionsTrack,
   getVideoTrack,
   type Timeline,
   type TransitionType,
+  type VideoClip,
 } from "./timeline.js";
-import type { Resolution } from "./types.js";
+import type {
+  ExportFormat,
+  ExportQuality,
+  Resolution,
+} from "./types.js";
+import { qualitySettings } from "./types.js";
 import { exportHorizontal, exportVertical } from "./aspect.js";
 
 export interface ExportTimelineOptions {
@@ -17,22 +24,63 @@ export interface ExportTimelineOptions {
   exportHorizontal?: boolean;
   exportVertical?: boolean;
   verticalMode?: "crop" | "blur";
+  /** 0 = left, 0.5 = center, 1 = right */
+  cropFocusX?: number;
   burnCaptions?: boolean;
+  fps?: number;
+  format?: ExportFormat;
+  quality?: ExportQuality;
+  audioBitrate?: "128k" | "192k" | "320k";
 }
 
 function assetPath(assetsDir: string, assetId: string, filename: string): string {
   return path.join(assetsDir, assetId, filename);
 }
 
+/** Build atempo chain for speeds outside [0.5, 2]. */
+function atempoChain(speed: number): string {
+  const parts: string[] = [];
+  let s = speed;
+  while (s > 2.0001) {
+    parts.push("atempo=2.0");
+    s /= 2;
+  }
+  while (s < 0.5 - 1e-6) {
+    parts.push("atempo=0.5");
+    s /= 0.5;
+  }
+  parts.push(`atempo=${s.toFixed(4)}`);
+  return parts.join(",");
+}
+
 async function renderClipSegment(
   input: string,
   out: string,
-  inMs: number,
-  outMs: number,
+  clip: VideoClip,
+  fps: number,
+  quality: ExportQuality,
+  audioBitrate: string,
 ): Promise<void> {
-  const start = (inMs / 1000).toFixed(3);
-  const end = (outMs / 1000).toFixed(3);
-  await mustRun("ffmpeg", [
+  const start = (clip.inMs / 1000).toFixed(3);
+  const end = (clip.outMs / 1000).toFixed(3);
+  const speed = clipSpeed(clip);
+  const { crf, preset } = qualitySettings(quality);
+  const muted = Boolean(clip.muted) || (clip.volume ?? 1) <= 0.001;
+  const volume = muted ? 0 : Math.min(2, Math.max(0, clip.volume ?? 1));
+
+  const vf: string[] = [];
+  const af: string[] = [];
+  if (Math.abs(speed - 1) > 0.001) {
+    vf.push(`setpts=PTS/${speed}`);
+    af.push(atempoChain(speed));
+  }
+  if (muted) {
+    af.push("volume=0");
+  } else if (Math.abs(volume - 1) > 0.001) {
+    af.push(`volume=${volume.toFixed(3)}`);
+  }
+
+  const args = [
     "-y",
     "-ss",
     start,
@@ -40,27 +88,104 @@ async function renderClipSegment(
     end,
     "-i",
     input,
+  ];
+  if (vf.length) {
+    args.push("-vf", vf.join(","));
+  }
+  if (af.length) {
+    args.push("-af", af.join(","));
+  }
+  args.push(
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    preset,
     "-crf",
-    "20",
+    String(crf),
+    "-r",
+    String(fps),
     "-c:a",
     "aac",
     "-b:a",
-    "192k",
+    audioBitrate,
+    "-movflags",
+    "+faststart",
+    out,
+  );
+  await mustRun("ffmpeg", args);
+}
+
+async function renderGapSegment(
+  out: string,
+  durationMs: number,
+  width: number,
+  height: number,
+  fps: number,
+  quality: ExportQuality,
+  audioBitrate: string,
+): Promise<void> {
+  const dur = Math.max(0.04, durationMs / 1000);
+  const { crf, preset } = qualitySettings(quality);
+  await mustRun("ffmpeg", [
+    "-y",
+    "-f",
+    "lavfi",
+    "-i",
+    `color=c=black:s=${width}x${height}:r=${fps}:d=${dur.toFixed(3)}`,
+    "-f",
+    "lavfi",
+    "-i",
+    `anullsrc=channel_layout=stereo:sample_rate=44100`,
+    "-t",
+    dur.toFixed(3),
+    "-c:v",
+    "libx264",
+    "-preset",
+    preset,
+    "-crf",
+    String(crf),
+    "-c:a",
+    "aac",
+    "-b:a",
+    audioBitrate,
+    "-shortest",
     "-movflags",
     "+faststart",
     out,
   ]);
 }
 
-async function concatWithTransitions(
+async function probeSize(
+  file: string,
+): Promise<{ width: number; height: number }> {
+  try {
+    const { runCommand } = await import("./binaries.js");
+    const result = await runCommand("ffprobe", [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=width,height",
+      "-of",
+      "csv=p=0",
+      file,
+    ]);
+    const [w, h] = result.stdout.trim().split(",").map(Number);
+    if (w && h) return { width: w, height: h };
+  } catch {
+    /* fallback */
+  }
+  return { width: 1920, height: 1080 };
+}
+
+async function concatSegments(
   segments: string[],
-  transitions: TransitionType[],
   workDir: string,
   output: string,
+  quality: ExportQuality,
+  audioBitrate: string,
+  fps: number,
 ): Promise<void> {
   if (segments.length === 0) {
     throw new Error("Nenhum clipe na timeline para exportar");
@@ -69,54 +194,13 @@ async function concatWithTransitions(
     await copyFile(segments[0]!, output);
     return;
   }
-
-  // Simple approach: xfade chain when crossfade/fade, else concat demuxer
-  const useXfade = transitions.some((t) => t === "crossfade" || t === "fade");
-  if (!useXfade) {
-    const list = path.join(workDir, "concat.txt");
-    const body = segments
-      .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
-      .join("\n");
-    await import("node:fs/promises").then((fs) => fs.writeFile(list, body, "utf8"));
-    await mustRun("ffmpeg", [
-      "-y",
-      "-f",
-      "concat",
-      "-safe",
-      "0",
-      "-i",
-      list,
-      "-c",
-      "copy",
-      output,
-    ]);
-    return;
-  }
-
-  // Build xfade filter chain (0.5s default)
-  let filter = "";
-  let last = "[0:v]";
-  let lastA = "[0:a]";
-  for (let i = 1; i < segments.length; i += 1) {
-    const td = 0.5;
-    const mode = transitions[i] === "fade" ? "fade" : "fade";
-    const outV = i === segments.length - 1 ? "[vout]" : `[v${i}]`;
-    const outA = i === segments.length - 1 ? "[aout]" : `[a${i}]`;
-    // offset approximated as cumulative - for MVP use xfade with offset= previous duration - td
-    // We use a simpler approach: sequential xfade with large offset placeholder via acrossfade
-    filter += `${last}[${i}:v]xfade=transition=${mode}:duration=${td}:offset=0${outV};`;
-    filter += `${lastA}[${i}:a]acrossfade=d=${td}${outA};`;
-    last = outV;
-    lastA = outA;
-  }
-
-  // offset=0 xfade is wrong for sequential - better use concat for reliability in MVP
-  // Fall back to concat for stability
   const list = path.join(workDir, "concat.txt");
   const body = segments
     .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
     .join("\n");
-  await import("node:fs/promises").then((fs) => fs.writeFile(list, body, "utf8"));
+  await writeFile(list, body, "utf8");
+  const { crf, preset } = qualitySettings(quality);
+  // Re-encode for consistent timestamps after mixed gap/clip segments
   await mustRun("ffmpeg", [
     "-y",
     "-f",
@@ -128,14 +212,111 @@ async function concatWithTransitions(
     "-c:v",
     "libx264",
     "-preset",
-    "veryfast",
+    preset,
     "-crf",
-    "20",
+    String(crf),
+    "-r",
+    String(fps),
     "-c:a",
     "aac",
+    "-b:a",
+    audioBitrate,
+    "-movflags",
+    "+faststart",
     output,
   ]);
-  void filter;
+}
+
+/**
+ * Apply xfade between segments when transitions request it.
+ * Falls back to hard concat if xfade build fails.
+ */
+async function concatWithTransitions(
+  segments: string[],
+  transitions: TransitionType[],
+  transitionMs: number[],
+  workDir: string,
+  output: string,
+  quality: ExportQuality,
+  audioBitrate: string,
+  fps: number,
+): Promise<void> {
+  const useXfade = transitions.some(
+    (t, i) => i > 0 && (t === "crossfade" || t === "fade"),
+  );
+  if (!useXfade || segments.length < 2) {
+    await concatSegments(
+      segments,
+      workDir,
+      output,
+      quality,
+      audioBitrate,
+      fps,
+    );
+    return;
+  }
+
+  try {
+    const inputs: string[] = [];
+    for (const seg of segments) {
+      inputs.push("-i", seg);
+    }
+    let filter = "";
+    let lastV = "[0:v]";
+    let lastA = "[0:a]";
+    let offset = 0;
+    // Approximate offsets from probe durations — use clip durations passed via transitionMs as duration of PREVIOUS visual segment
+    for (let i = 1; i < segments.length; i += 1) {
+      const td = Math.min(
+        1,
+        Math.max(0.1, (transitionMs[i] ?? 500) / 1000),
+      );
+      const prevDur = Math.max(td + 0.05, (transitionMs[i - 1] ?? 1000) / 1000);
+      offset += prevDur - td;
+      const mode = transitions[i] === "fade" ? "fadeblack" : "fade";
+      const outV = i === segments.length - 1 ? "[vout]" : `[v${i}]`;
+      const outA = i === segments.length - 1 ? "[aout]" : `[a${i}]`;
+      filter += `${lastV}[${i}:v]xfade=transition=${mode}:duration=${td}:offset=${offset.toFixed(3)}${outV};`;
+      filter += `${lastA}[${i}:a]acrossfade=d=${td}${outA};`;
+      lastV = outV;
+      lastA = outA;
+    }
+    const { crf, preset } = qualitySettings(quality);
+    await mustRun("ffmpeg", [
+      "-y",
+      ...inputs,
+      "-filter_complex",
+      filter,
+      "-map",
+      "[vout]",
+      "-map",
+      "[aout]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      preset,
+      "-crf",
+      String(crf),
+      "-r",
+      String(fps),
+      "-c:a",
+      "aac",
+      "-b:a",
+      audioBitrate,
+      "-movflags",
+      "+faststart",
+      output,
+    ]);
+  } catch {
+    await concatSegments(
+      segments,
+      workDir,
+      output,
+      quality,
+      audioBitrate,
+      fps,
+    );
+  }
 }
 
 export async function exportFromTimeline(params: {
@@ -150,6 +331,12 @@ export async function exportFromTimeline(params: {
   await mkdir(workDir, { recursive: true });
   await mkdir(outputDir, { recursive: true });
 
+  const fps = options.fps ?? timeline.fps ?? 30;
+  const quality = options.quality ?? "high";
+  const audioBitrate = options.audioBitrate ?? "192k";
+  const format: ExportFormat = options.format ?? "mp4";
+  const ext = format === "mov" ? "mov" : "mp4";
+
   const videoTrack = getVideoTrack(timeline);
   const clips = [...videoTrack.clips].sort(
     (a, b) => a.timelineStartMs - b.timelineStartMs,
@@ -158,24 +345,68 @@ export async function exportFromTimeline(params: {
     throw new Error("Adicione pelo menos um clipe de vídeo antes de exportar");
   }
 
-  params.onProgress?.("Cortando clipes", 15);
+  params.onProgress?.("Cortando clipes", 10);
   const segments: string[] = [];
   const transitions: TransitionType[] = [];
+  const segDurationsMs: number[] = [];
+
+  let cursor = 0;
+  let refSize = { width: 1920, height: 1080 };
+  const firstMeta = timeline.assets[clips[0]!.assetId];
+  if (firstMeta?.width && firstMeta.height) {
+    refSize = { width: firstMeta.width, height: firstMeta.height };
+  }
 
   for (let i = 0; i < clips.length; i += 1) {
     const clip = clips[i]!;
+    const gap = clip.timelineStartMs - cursor;
+    if (gap > 40) {
+      const gapPath = path.join(
+        workDir,
+        `gap_${String(segments.length).padStart(3, "0")}.mp4`,
+      );
+      await renderGapSegment(
+        gapPath,
+        gap,
+        refSize.width,
+        refSize.height,
+        fps,
+        quality,
+        audioBitrate,
+      );
+      segments.push(gapPath);
+      transitions.push("cut");
+      segDurationsMs.push(gap);
+      cursor += gap;
+    }
+
     const meta = timeline.assets[clip.assetId];
     if (!meta) throw new Error(`Asset ausente: ${clip.assetId}`);
     const input = assetPath(assetsDir, clip.assetId, meta.filename);
     const seg = path.join(workDir, `seg_${String(i).padStart(3, "0")}.mp4`);
-    await renderClipSegment(input, seg, clip.inMs, clip.outMs);
+    await renderClipSegment(input, seg, clip, fps, quality, audioBitrate);
+    if (i === 0) {
+      refSize = await probeSize(seg);
+    }
     segments.push(seg);
     transitions.push(clip.transitionIn ?? "cut");
+    const dur = clipDurationMs(clip);
+    segDurationsMs.push(dur);
+    cursor = clip.timelineStartMs + dur;
   }
 
   params.onProgress?.("Montando sequência", 45);
-  let composed = path.join(workDir, "composed.mp4");
-  await concatWithTransitions(segments, transitions, workDir, composed);
+  let composed = path.join(workDir, `composed.${ext}`);
+  await concatWithTransitions(
+    segments,
+    transitions,
+    segDurationsMs,
+    workDir,
+    composed,
+    quality,
+    audioBitrate,
+    fps,
+  );
 
   if (options.burnCaptions !== false) {
     const captions = getCaptionsTrack(timeline).cues;
@@ -183,9 +414,12 @@ export async function exportFromTimeline(params: {
       params.onProgress?.("Gravando legendas", 60);
       const assPath = path.join(workDir, "captions.ass");
       await writeAssFile(captions, assPath);
-      const burned = path.join(workDir, "composed_subs.mp4");
-      // Escape path for subtitles filter
-      const escaped = assPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+      const burned = path.join(workDir, `composed_subs.${ext}`);
+      const escaped = assPath
+        .replace(/\\/g, "/")
+        .replace(/:/g, "\\:")
+        .replace(/'/g, "\\'");
+      const { crf, preset } = qualitySettings(quality);
       await mustRun("ffmpeg", [
         "-y",
         "-i",
@@ -195,11 +429,15 @@ export async function exportFromTimeline(params: {
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        preset,
         "-crf",
-        "20",
+        String(crf),
+        "-r",
+        String(fps),
         "-c:a",
         "copy",
+        "-movflags",
+        "+faststart",
         burned,
       ]);
       composed = burned;
@@ -210,9 +448,15 @@ export async function exportFromTimeline(params: {
   const wantH = options.exportHorizontal !== false;
   const wantV = options.exportVertical !== false;
   const resolution = options.resolution ?? "1080p";
+  const encode = {
+    fps,
+    quality,
+    audioBitrate,
+    format,
+  };
 
   if (!wantH && !wantV) {
-    const name = "export.mp4";
+    const name = `export.${ext}`;
     const dest = path.join(outputDir, name);
     await copyFile(composed, dest);
     results.push({ name, label: "Exportação", path: dest });
@@ -220,21 +464,24 @@ export async function exportFromTimeline(params: {
 
   if (wantH) {
     params.onProgress?.("Export horizontal", 75);
-    const name = "export_horizontal_16x9.mp4";
+    const name = `export_horizontal_16x9.${ext}`;
     const dest = path.join(outputDir, name);
-    await exportHorizontal(composed, dest, resolution);
+    await exportHorizontal(composed, dest, resolution, undefined, encode);
     results.push({ name, label: "Horizontal 16:9", path: dest });
   }
 
   if (wantV) {
     params.onProgress?.("Export vertical", 90);
-    const name = "export_vertical_9x16.mp4";
+    const name = `export_vertical_9x16.${ext}`;
     const dest = path.join(outputDir, name);
     await exportVertical(
       composed,
       dest,
       resolution,
       options.verticalMode ?? "crop",
+      undefined,
+      encode,
+      options.cropFocusX ?? 0.5,
     );
     results.push({ name, label: "Vertical 9:16", path: dest });
   }

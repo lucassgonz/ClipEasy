@@ -1,4 +1,4 @@
--- ClipFácil: profiles + projects with RLS
+-- clipEasy: profiles + projects with RLS
 create extension if not exists "pgcrypto";
 
 create table if not exists public.profiles (
