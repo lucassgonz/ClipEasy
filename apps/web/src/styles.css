@@ -108,6 +108,12 @@ textarea {
   white-space: pre-wrap;
 }
 
+.progress-label {
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+  margin: 0.5rem 0;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -497,6 +503,146 @@ textarea {
   backdrop-filter: blur(4px);
 }
 
+.status-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(8, 20, 28, 0.5);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  backdrop-filter: blur(6px);
+  animation: status-fade-in 0.18s ease-out;
+}
+
+.status-popup {
+  width: min(420px, 100%);
+  background: #f7fbfc;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 28px 70px rgba(8, 52, 61, 0.32);
+  padding: 1.35rem 1.4rem 1.25rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  animation: status-pop-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+}
+
+.status-popup h2 {
+  font-family: var(--font-display);
+  margin: 0;
+  font-size: 1.4rem;
+  letter-spacing: -0.02em;
+  color: var(--leaf-deep);
+}
+
+.status-popup p {
+  margin: 0;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  line-height: 1.4;
+  max-width: 34ch;
+}
+
+.status-popup-wait {
+  font-size: 0.88rem;
+  opacity: 0.85;
+}
+
+.status-popup-icon {
+  width: 3.1rem;
+  height: 3.1rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  margin-bottom: 0.15rem;
+}
+
+.status-popup-processing .status-popup-icon {
+  background: rgba(224, 122, 47, 0.14);
+  color: var(--sun);
+}
+
+.status-popup-success .status-popup-icon {
+  background: rgba(13, 79, 91, 0.14);
+  color: var(--leaf);
+}
+
+.status-popup-error .status-popup-icon {
+  background: rgba(180, 35, 24, 0.12);
+  color: var(--danger);
+}
+
+.status-popup-error h2 {
+  color: var(--danger);
+}
+
+.status-popup-confirm .status-popup-icon {
+  background: rgba(224, 122, 47, 0.14);
+  color: var(--sun);
+}
+
+.status-popup-actions {
+  display: flex;
+  gap: 0.55rem;
+  justify-content: center;
+  margin-top: 0.55rem;
+  width: 100%;
+}
+
+.status-popup-actions .ghost,
+.status-popup-actions .cta {
+  min-width: 5.5rem;
+}
+
+.status-mark {
+  font-size: 1.45rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.status-spinner {
+  width: 1.35rem;
+  height: 1.35rem;
+  border: 2.5px solid rgba(224, 122, 47, 0.25);
+  border-top-color: var(--sun);
+  border-radius: 50%;
+  animation: status-spin 0.75s linear infinite;
+}
+
+.status-popup .cta {
+  margin-top: 0.55rem;
+  min-width: 6.5rem;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes status-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes status-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .modal {
   width: min(560px, 100%);
   max-height: min(90vh, 720px);
@@ -776,12 +922,50 @@ textarea {
   clear: both;
 }
 
+.timeline-zoom-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.timeline-zoom-label input[type="range"] {
+  width: min(160px, 28vw);
+}
+
+.chunk-downloads {
+  max-height: 220px;
+  overflow-y: auto;
+  padding-left: 0;
+  list-style: none;
+  margin: 0.4rem 0 0;
+}
+
+.chunk-downloads li {
+  margin: 0.25rem 0;
+}
+
+.chunk-downloads .ghost {
+  width: 100%;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
 .timeline-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
   margin-bottom: 0.55rem;
+}
+
+.timeline-zoom-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.timeline-zoom-label input[type="range"] {
+  width: min(160px, 28vw);
 }
 
 .timeline-toolbar button,
@@ -938,6 +1122,11 @@ textarea {
   font-size: 0.92rem;
 }
 
+.export-box .cta.small {
+  width: 100%;
+  margin: 0.4rem 0 0.55rem;
+}
+
 .export-box ul {
   padding-left: 1rem;
   margin: 0.4rem 0 0;
@@ -964,6 +1153,28 @@ textarea {
   margin-top: 0.5rem;
   padding-top: 0.35rem;
   border-top: 1px solid var(--line);
+}
+
+.side-subhead {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  margin: 1.1rem 0 0.35rem;
+  color: var(--leaf-deep);
+}
+
+.recipe-more {
+  margin: 0.55rem 0 0.35rem;
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+}
+
+.recipe-more summary {
+  cursor: pointer;
+  margin-bottom: 0.35rem;
+}
+
+.clip-meta-box .cta.small {
+  margin-top: 0.45rem;
 }
 
 .yt-box textarea {

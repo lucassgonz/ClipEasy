@@ -57,10 +57,14 @@ export function ImageStudio({
 
   useEffect(() => {
     if (!studio?.assetId || !project) {
-      setBlobUrl(null);
+      setBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
       return;
     }
     let revoked: string | null = null;
+    let cancelled = false;
     void (async () => {
       const session = await getSession();
       const res = await fetch(mediaUrl(project.id, studio.assetId), {
@@ -68,12 +72,20 @@ export function ImageStudio({
           ? { Authorization: `Bearer ${session.access_token}` }
           : {},
       });
-      if (!res.ok) return;
+      if (!res.ok || cancelled) return;
       const url = URL.createObjectURL(await res.blob());
+      if (cancelled) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       revoked = url;
-      setBlobUrl(url);
+      setBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return url;
+      });
     })();
     return () => {
+      cancelled = true;
       if (revoked) URL.revokeObjectURL(revoked);
     };
   }, [studio?.assetId, project?.id]);

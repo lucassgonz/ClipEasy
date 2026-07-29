@@ -7,6 +7,15 @@ interface SilenceInterval {
   end: number;
 }
 
+export interface SilenceRemovalResult {
+  path: string;
+  changed: boolean;
+  silenceCount: number;
+  originalDurationSec: number;
+  newDurationSec: number;
+  message: string;
+}
+
 function parseSilence(stderr: string): SilenceInterval[] {
   const starts: number[] = [];
   const ends: number[] = [];
@@ -44,14 +53,14 @@ function keepSegments(
   return keeps.filter((s) => s.end - s.start >= 0.1);
 }
 
-export async function removeSilence(
+/** Collect only silencedetect lines — full ffmpeg stderr can exceed the cap. */
+async function detectSilences(
   inputPath: string,
-  outputDir: string,
   thresholdDb: number,
   minDuration: number,
   onProgress?: (chunk: string) => void,
-): Promise<string> {
-  const duration = await probeDurationSeconds(inputPath);
+): Promise<SilenceInterval[]> {
+  let silenceLog = "";
   const detect = await runCommand(
     "ffmpeg",
     [
@@ -63,10 +72,41 @@ export async function removeSilence(
       "null",
       "-",
     ],
+    (chunk) => {
+      onProgress?.(chunk);
+      for (const line of chunk.split("\n")) {
+        if (line.includes("silence_start") || line.includes("silence_end")) {
+          silenceLog += `${line}\n`;
+        }
+      }
+    },
+  );
+  // Prefer incremental log; fall back to full stderr if callback missed lines.
+  const source = silenceLog || detect.stderr;
+  return parseSilence(source);
+}
+
+function formatDuration(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return m > 0 ? `${m}m ${r.toString().padStart(2, "0")}s` : `${r}s`;
+}
+
+export async function removeSilence(
+  inputPath: string,
+  outputDir: string,
+  thresholdDb: number,
+  minDuration: number,
+  onProgress?: (chunk: string) => void,
+): Promise<SilenceRemovalResult> {
+  const duration = await probeDurationSeconds(inputPath);
+  const silences = await detectSilences(
+    inputPath,
+    thresholdDb,
+    minDuration,
     onProgress,
   );
-
-  const silences = parseSilence(detect.stderr);
   const keeps = keepSegments(duration, silences);
 
   if (keeps.length === 0) {
@@ -76,27 +116,36 @@ export async function removeSilence(
   }
 
   if (
-    keeps.length === 1 &&
-    keeps[0]!.start <= 0.05 &&
-    keeps[0]!.end >= duration - 0.05
+    silences.length === 0 ||
+    (keeps.length === 1 &&
+      keeps[0]!.start <= 0.05 &&
+      keeps[0]!.end >= duration - 0.05)
   ) {
-    return inputPath;
+    return {
+      path: inputPath,
+      changed: false,
+      silenceCount: 0,
+      originalDurationSec: duration,
+      newDurationSec: duration,
+      message: `Nenhum silêncio longo detectado (≥ ${minDuration}s abaixo de ${thresholdDb} dB). Vídeo inalterado (${formatDuration(duration)}).`,
+    };
   }
 
   const segmentPaths: string[] = [];
   for (let i = 0; i < keeps.length; i += 1) {
     const seg = keeps[i]!;
     const out = path.join(outputDir, `silence_seg_${i}.mp4`);
+    const segDuration = Math.max(0.1, seg.end - seg.start);
     await mustRun(
       "ffmpeg",
       [
         "-y",
         "-ss",
         String(seg.start),
-        "-to",
-        String(seg.end),
         "-i",
         inputPath,
+        "-t",
+        String(segDuration),
         "-c:v",
         "libx264",
         "-preset",
@@ -114,21 +163,32 @@ export async function removeSilence(
     segmentPaths.push(out);
   }
 
+  let outPath: string;
   if (segmentPaths.length === 1) {
-    return segmentPaths[0]!;
+    outPath = segmentPaths[0]!;
+  } else {
+    const listPath = path.join(outputDir, "silence_concat.txt");
+    const listBody = segmentPaths
+      .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
+      .join("\n");
+    await writeFile(listPath, listBody, "utf8");
+
+    outPath = path.join(outputDir, "no_silence.mp4");
+    await mustRun(
+      "ffmpeg",
+      ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outPath],
+      onProgress,
+    );
   }
 
-  const listPath = path.join(outputDir, "silence_concat.txt");
-  const listBody = segmentPaths
-    .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
-    .join("\n");
-  await writeFile(listPath, listBody, "utf8");
-
-  const out = path.join(outputDir, "no_silence.mp4");
-  await mustRun(
-    "ffmpeg",
-    ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", out],
-    onProgress,
-  );
-  return out;
+  const newDuration = await probeDurationSeconds(outPath);
+  const saved = Math.max(0, duration - newDuration);
+  return {
+    path: outPath,
+    changed: true,
+    silenceCount: silences.length,
+    originalDurationSec: duration,
+    newDurationSec: newDuration,
+    message: `Removidos ${silences.length} trecho(s) de silêncio. Duração ${formatDuration(duration)} → ${formatDuration(newDuration)} (economizou ${formatDuration(saved)}).`,
+  };
 }

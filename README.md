@@ -10,6 +10,8 @@ O processamento roda **no seu computador**; a nuvem guarda só login e o JSON da
 - Projetos **vídeo** e **imagem**
 - Timeline estilo CapCut: trim, split, drag, apagar, duplicar, desfazer/refazer, volume, velocidade, fechar buracos
 - Preview contínuo entre clipes + pré-visualização do enquadramento 9:16
+- Zoom da timeline com **Ajustar zoom** (cabe vídeos longos, ex. 1h)
+- **Dividir e exportar pedaços** (ex. a cada 60s) com download de cada arquivo
 - Export profissional: 16:9 / 9:16 / ambos, resolução até 4K, FPS, formato MP4/MOV, qualidade, bitrate de áudio, burn-in de legendas
 - Vertical: recorte (esquerda / centro / direita / personalizado) ou fundo desfocado
 - Editor de foto: crop com pan, brilho/contraste, export JPEG

@@ -92,8 +92,18 @@ export interface YoutubeMeta {
   tags: string[];
 }
 
+export interface ClipYoutubeMeta {
+  clipId: string;
+  filename: string;
+  title: string;
+  description: string;
+  hashtags: string[];
+  transcriptPreview?: string;
+}
+
 export interface ProjectMetadata {
   youtube?: YoutubeMeta;
+  clipMeta?: ClipYoutubeMeta[];
 }
 
 export interface Project {
@@ -124,6 +134,8 @@ export interface ExportJob {
   status: string;
   progress: { step: string; percent: number };
   outputs: Array<{ name: string; label: string; url: string }>;
+  /** Download all outputs as a single zip. */
+  zipUrl?: string;
   error?: string;
 }
 

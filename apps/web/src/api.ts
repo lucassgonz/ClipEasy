@@ -23,7 +23,20 @@ async function authHeaders(): Promise<HeadersInit> {
 }
 
 async function parseJson<T>(res: Response): Promise<T> {
-  const data = (await res.json()) as T & { error?: string };
+  const text = await res.text();
+  if (!text) {
+    if (!res.ok) throw new Error(`Erro HTTP ${res.status} (resposta vazia)`);
+    throw new Error("Resposta vazia do servidor");
+  }
+  let data: T & { error?: string };
+  try {
+    data = JSON.parse(text) as T & { error?: string };
+  } catch {
+    const snippet = text.replace(/\s+/g, " ").slice(0, 160);
+    throw new Error(
+      `Resposta inválida do servidor (HTTP ${res.status}): ${snippet}`,
+    );
+  }
   if (!res.ok) {
     throw new Error(data.error || `Erro HTTP ${res.status}`);
   }
@@ -175,11 +188,44 @@ export async function suggestYoutube(
   return parseJson(res);
 }
 
+export async function startClipMetaGenerate(projectId: string): Promise<string> {
+  const res = await fetch(`${API}/projects/${projectId}/clips/meta/generate`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  const data = await parseJson<{ jobId: string }>(res);
+  return data.jobId;
+}
+
+export function clipMetaTxtUrl(projectId: string): string {
+  return `${API}/projects/${projectId}/clips/meta.txt`;
+}
+
 export async function startExport(
   projectId: string,
   options: ExportOptions,
 ): Promise<string> {
   const res = await fetch(`${API}/projects/${projectId}/export`, {
+    method: "POST",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(options),
+  });
+  const data = await parseJson<{ jobId: string }>(res);
+  return data.jobId;
+}
+
+export async function startChunkExport(
+  projectId: string,
+  options: ExportOptions & {
+    everySeconds?: number;
+    applyToTimeline?: boolean;
+    exportExistingClips?: boolean;
+  },
+): Promise<string> {
+  const res = await fetch(`${API}/projects/${projectId}/export/chunks`, {
     method: "POST",
     headers: {
       ...(await authHeaders()),
@@ -210,7 +256,17 @@ export async function recipeSplit(
   return parseJson(res);
 }
 
-export async function recipeSilence(projectId: string): Promise<Project> {
+export interface SilenceRecipeResult {
+  changed: boolean;
+  silenceCount: number;
+  originalDurationMs: number;
+  newDurationMs: number;
+  message: string;
+}
+
+export async function recipeSilence(
+  projectId: string,
+): Promise<{ project: Project; result: SilenceRecipeResult }> {
   const res = await fetch(`${API}/projects/${projectId}/recipes/silence`, {
     method: "POST",
     headers: await authHeaders(),

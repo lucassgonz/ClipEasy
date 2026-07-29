@@ -1,4 +1,4 @@
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { writeAssFile } from "./captions.js";
 import { mustRun } from "./binaries.js";
@@ -113,6 +113,45 @@ async function renderClipSegment(
     out,
   );
   await mustRun("ffmpeg", args);
+}
+
+/** True when we can split with stream copy (no re-encode). */
+function canStreamCopyClip(clip: VideoClip): boolean {
+  const speed = clipSpeed(clip);
+  const volume = clip.volume ?? 1;
+  return (
+    Math.abs(speed - 1) < 0.001 &&
+    !clip.muted &&
+    Math.abs(volume - 1) < 0.001
+  );
+}
+
+/**
+ * Fast keyframe-aligned cut via stream copy — seconds, not minutes, per chunk.
+ */
+async function cutClipSegmentCopy(
+  input: string,
+  out: string,
+  clip: VideoClip,
+): Promise<void> {
+  const start = (clip.inMs / 1000).toFixed(3);
+  const duration = Math.max(0.05, (clip.outMs - clip.inMs) / 1000).toFixed(3);
+  await mustRun("ffmpeg", [
+    "-y",
+    "-ss",
+    start,
+    "-i",
+    input,
+    "-t",
+    duration,
+    "-c",
+    "copy",
+    "-avoid_negative_ts",
+    "make_zero",
+    "-movflags",
+    "+faststart",
+    out,
+  ]);
 }
 
 async function renderGapSegment(
@@ -484,6 +523,173 @@ export async function exportFromTimeline(params: {
       options.cropFocusX ?? 0.5,
     );
     results.push({ name, label: "Vertical 9:16", path: dest });
+  }
+
+  params.onProgress?.("Concluído", 100);
+  return results;
+}
+
+/** Split video clips into fixed-length pieces (source time). */
+export function sliceClipsEverySeconds(
+  clips: VideoClip[],
+  everySeconds: number,
+): VideoClip[] {
+  const everyMs = Math.round(everySeconds * 1000);
+  if (everyMs <= 0) return clips;
+  const out: VideoClip[] = [];
+  let tStart = 0;
+  const sorted = [...clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
+  for (const clip of sorted) {
+    let cursor = clip.inMs;
+    while (cursor < clip.outMs - 50) {
+      const end = Math.min(clip.outMs, cursor + everyMs);
+      const piece: VideoClip = {
+        ...clip,
+        id: `${clip.id}-${out.length}`,
+        timelineStartMs: tStart,
+        inMs: cursor,
+        outMs: end,
+        transitionIn: "cut",
+      };
+      out.push(piece);
+      tStart += clipDurationMs(piece);
+      cursor = end;
+    }
+  }
+  return out;
+}
+
+/**
+ * Export each chunk of `everySeconds` as a separate file.
+ * Optionally also applies H/V aspect to each piece.
+ */
+export async function exportTimelineChunks(params: {
+  timeline: Timeline;
+  assetsDir: string;
+  workDir: string;
+  outputDir: string;
+  everySeconds: number;
+  /** Export each timeline clip as one file (no further slicing). */
+  exportExistingClips?: boolean;
+  options: ExportTimelineOptions;
+  onProgress?: (step: string, percent: number) => void;
+}): Promise<Array<{ name: string; label: string; path: string }>> {
+  const { timeline, assetsDir, workDir, outputDir, options } = params;
+  const everySeconds = Math.max(1, params.everySeconds || 60);
+  await mkdir(workDir, { recursive: true });
+  await mkdir(outputDir, { recursive: true });
+
+  const fps = options.fps ?? timeline.fps ?? 30;
+  const quality = options.quality ?? "high";
+  const audioBitrate = options.audioBitrate ?? "192k";
+  const format: ExportFormat = options.format ?? "mp4";
+  const ext = format === "mov" ? "mov" : "mp4";
+  const resolution = options.resolution ?? "1080p";
+  const wantH = options.exportHorizontal === true;
+  const wantV = options.exportVertical === true;
+  // Default: one file per chunk without forced aspect (fast). If H/V asked, apply.
+  const plain = !wantH && !wantV;
+
+  const videoTrack = getVideoTrack(timeline);
+  if (videoTrack.clips.length === 0) {
+    throw new Error("Adicione pelo menos um clipe de vídeo antes de exportar");
+  }
+  const pieces = params.exportExistingClips
+    ? [...videoTrack.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs)
+    : sliceClipsEverySeconds(videoTrack.clips, everySeconds);
+  if (pieces.length === 0) {
+    throw new Error("Nenhum pedaço gerado — verifique a duração do vídeo");
+  }
+
+  const results: Array<{ name: string; label: string; path: string }> = [];
+  const encode = { fps, quality, audioBitrate, format };
+  const total = pieces.length;
+
+  for (let i = 0; i < total; i += 1) {
+    const piece = pieces[i]!;
+    const pctStart = Math.round((i / total) * 95);
+    params.onProgress?.(
+      `Exportando pedaço ${i + 1}/${total}`,
+      Math.max(1, pctStart),
+    );
+    const meta = timeline.assets[piece.assetId];
+    if (!meta) throw new Error(`Asset ausente: ${piece.assetId}`);
+    const input = assetPath(assetsDir, piece.assetId, meta.filename);
+
+    const base = `parte_${String(i + 1).padStart(3, "0")}`;
+    const startSec = Math.floor(piece.timelineStartMs / 1000);
+    const labelTime = `${Math.floor(startSec / 60)}m${String(startSec % 60).padStart(2, "0")}s`;
+    const useCopy = canStreamCopyClip(piece);
+
+    if (plain && useCopy) {
+      const name = `${base}.${ext}`;
+      const dest = path.join(outputDir, name);
+      await cutClipSegmentCopy(input, dest, piece);
+      results.push({
+        name,
+        label: `Parte ${i + 1} (${labelTime})`,
+        path: dest,
+      });
+      params.onProgress?.(
+        `Pedaço ${i + 1}/${total} pronto`,
+        Math.round(((i + 1) / total) * 95),
+      );
+      continue;
+    }
+
+    const raw = path.join(
+      workDir,
+      `chunk_${String(i + 1).padStart(3, "0")}.mp4`,
+    );
+    if (useCopy) {
+      await cutClipSegmentCopy(input, raw, piece);
+    } else {
+      await renderClipSegment(input, raw, piece, fps, quality, audioBitrate);
+    }
+
+    if (plain) {
+      const name = `${base}.${ext}`;
+      const dest = path.join(outputDir, name);
+      await copyFile(raw, dest);
+      results.push({
+        name,
+        label: `Parte ${i + 1} (${labelTime})`,
+        path: dest,
+      });
+    }
+    if (wantH) {
+      const name = `${base}_16x9.${ext}`;
+      const dest = path.join(outputDir, name);
+      await exportHorizontal(raw, dest, resolution, undefined, encode);
+      results.push({
+        name,
+        label: `Parte ${i + 1} 16:9 (${labelTime})`,
+        path: dest,
+      });
+    }
+    if (wantV) {
+      const name = `${base}_9x16.${ext}`;
+      const dest = path.join(outputDir, name);
+      await exportVertical(
+        raw,
+        dest,
+        resolution,
+        options.verticalMode ?? "crop",
+        undefined,
+        encode,
+        options.cropFocusX ?? 0.5,
+      );
+      results.push({
+        name,
+        label: `Parte ${i + 1} 9:16 (${labelTime})`,
+        path: dest,
+      });
+    }
+    await rm(raw, { force: true }).catch(() => undefined);
+    params.onProgress?.(
+      `Pedaço ${i + 1}/${total} pronto`,
+      Math.round(((i + 1) / total) * 95),
+    );
   }
 
   params.onProgress?.("Concluído", 100);

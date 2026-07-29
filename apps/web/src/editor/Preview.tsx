@@ -10,6 +10,7 @@ import {
 import { mediaUrl } from "../api";
 import { getSession } from "../lib/supabase";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getCachedMediaUrl, setCachedMediaUrl } from "./mediaCache";
 
 export function Preview({
   projectId,
@@ -42,6 +43,14 @@ export function Preview({
   const videoRef = useRef<HTMLVideoElement>(null);
   const blurRef = useRef<HTMLVideoElement>(null);
   const clip = findActiveVideoClip(timeline, timeMs);
+  const clipRef = useRef(clip);
+  clipRef.current = clip;
+  const onTimeRef = useRef(onTime);
+  onTimeRef.current = onTime;
+  const onPlayingChangeRef = useRef(onPlayingChange);
+  onPlayingChangeRef.current = onPlayingChange;
+  const onTogglePlayRef = useRef(onTogglePlay);
+  onTogglePlayRef.current = onTogglePlay;
   const cue = useMemo(() => {
     const track = timeline.tracks.find((t) => t.type === "captions");
     if (!track || track.type !== "captions") return null;
@@ -55,9 +64,14 @@ export function Preview({
     if (!track || track.type !== "video") return [] as VideoClip[];
     return [...track.clips].sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   }, [timeline]);
+  const sortedClipsRef = useRef(sortedClips);
+  sortedClipsRef.current = sortedClips;
 
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const lastAsset = useRef<string>("");
+  const [blobUrl, setBlobUrl] = useState<string | null>(() =>
+    clip ? (getCachedMediaUrl(projectId, clip.assetId) ?? null) : null,
+  );
+  const lastAsset = useRef<string>(clip?.assetId ?? "");
+  const lastSyncedClipId = useRef<string | null>(clip?.id ?? null);
 
   const focus = Math.min(1, Math.max(0, cropFocusX ?? 0.5));
   const mode = verticalMode ?? "crop";
@@ -69,8 +83,13 @@ export function Preview({
       setBlobUrl(null);
       return;
     }
+    const cached = getCachedMediaUrl(projectId, clip.assetId);
+    if (cached) {
+      lastAsset.current = clip.assetId;
+      setBlobUrl(cached);
+      return;
+    }
     if (lastAsset.current === clip.assetId && blobUrl) return;
-    let revoked: string | null = null;
     let cancelled = false;
     void (async () => {
       const session = await getSession();
@@ -83,13 +102,12 @@ export function Preview({
       const blob = await res.blob();
       if (cancelled) return;
       const url = URL.createObjectURL(blob);
-      revoked = url;
+      setCachedMediaUrl(projectId, clip.assetId, url);
       lastAsset.current = clip.assetId;
       setBlobUrl(url);
     })();
     return () => {
       cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
     };
   }, [clip?.assetId, projectId]);
 
@@ -106,57 +124,104 @@ export function Preview({
 
   useEffect(() => {
     const el = videoRef.current;
-    if (!el || !clip) return;
-    syncMedia(el);
+    if (!el || !clip) {
+      lastSyncedClipId.current = null;
+      return;
+    }
+    const clipChanged = lastSyncedClipId.current !== clip.id;
+    // While playing, only hard-seek when the active clip changes (or when paused/scrubbing).
+    if (!playing || clipChanged) {
+      syncMedia(el);
+      lastSyncedClipId.current = clip.id;
+    } else {
+      el.playbackRate = clipSpeed(clip);
+    }
     el.volume = clip.muted ? 0 : Math.min(1, Math.max(0, clip.volume ?? 1));
     el.muted = Boolean(clip.muted);
     if (blurRef.current) {
-      syncMedia(blurRef.current);
+      if (!playing || clipChanged) syncMedia(blurRef.current);
       blurRef.current.muted = true;
       blurRef.current.volume = 0;
     }
-  }, [timeMs, clip?.id, clip?.speed, clip?.volume, clip?.muted, isVertical, mode]);
+  }, [timeMs, clip?.id, clip?.speed, clip?.volume, clip?.muted, isVertical, mode, playing]);
 
   useEffect(() => {
-    const els = [videoRef.current, blurRef.current].filter(Boolean) as HTMLVideoElement[];
+    const els = [videoRef.current, blurRef.current].filter(
+      Boolean,
+    ) as HTMLVideoElement[];
     for (const el of els) {
       if (playing) void el.play().catch(() => undefined);
       else el.pause();
     }
   }, [playing, blobUrl, clip?.id, isVertical, mode]);
 
-  function advanceOrStop(endedClip: VideoClip) {
-    const end = endedClip.timelineStartMs + clipDurationMs(endedClip);
-    const next = sortedClips.find((c) => c.timelineStartMs >= end - 1);
-    if (next) {
-      onTime(next.timelineStartMs);
-      return;
+  // Keep timeline playhead in sync with the video clock every frame while playing.
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let stopped = false;
+
+    function advanceOrStop(endedClip: VideoClip) {
+      const end = endedClip.timelineStartMs + clipDurationMs(endedClip);
+      const next = sortedClipsRef.current.find(
+        (c) => c.timelineStartMs >= end - 1,
+      );
+      if (next) {
+        onTimeRef.current(next.timelineStartMs);
+        return;
+      }
+      stopped = true;
+      if (onPlayingChangeRef.current) onPlayingChangeRef.current(false);
+      else onTogglePlayRef.current();
     }
-    if (onPlayingChange) onPlayingChange(false);
-    else onTogglePlay();
-  }
+
+    const tick = () => {
+      if (stopped) return;
+      const el = videoRef.current;
+      const active = clipRef.current;
+      if (el && active && !el.paused) {
+        const speed = clipSpeed(active);
+        const localMs = el.currentTime * 1000;
+        const timelinePos =
+          active.timelineStartMs + (localMs - active.inMs) / speed;
+        const clipEnd = active.timelineStartMs + clipDurationMs(active);
+        if (timelinePos >= clipEnd - 30) {
+          advanceOrStop(active);
+        } else {
+          onTimeRef.current(Math.max(active.timelineStartMs, timelinePos));
+        }
+        const blur = blurRef.current;
+        if (blur && Math.abs(blur.currentTime - el.currentTime) > 0.12) {
+          blur.currentTime = el.currentTime;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [playing]);
 
   function onVideoTimeUpdate(e: React.SyntheticEvent<HTMLVideoElement>) {
-    if (!clip || !playing) return;
+    // When paused, still reflect scrubbing / seeks on the timeline.
+    if (!clip || playing) return;
     const speed = clipSpeed(clip);
     const localMs = e.currentTarget.currentTime * 1000;
     const timelinePos = clip.timelineStartMs + (localMs - clip.inMs) / speed;
-    const clipEnd = clip.timelineStartMs + clipDurationMs(clip);
-    if (timelinePos >= clipEnd - 30) {
-      advanceOrStop(clip);
-      return;
-    }
     onTime(Math.max(clip.timelineStartMs, timelinePos));
-    const blur = blurRef.current;
-    if (blur && Math.abs(blur.currentTime - e.currentTarget.currentTime) > 0.12) {
-      blur.currentTime = e.currentTarget.currentTime;
-    }
   }
 
   const objectPosition = `${(focus * 100).toFixed(1)}% 50%`;
-
   const cropPreset =
-    focus <= 0.05 ? "left" : focus >= 0.95 ? "right" : Math.abs(focus - 0.5) < 0.05 ? "center" : "custom";
+    focus <= 0.05
+      ? "left"
+      : focus >= 0.95
+        ? "right"
+        : Math.abs(focus - 0.5) < 0.05
+          ? "center"
+          : "custom";
 
   return (
     <div className="preview">
@@ -187,15 +252,21 @@ export function Preview({
                   : undefined
               }
               style={
-                isVertical && mode === "crop"
-                  ? { objectPosition }
-                  : undefined
+                isVertical && mode === "crop" ? { objectPosition } : undefined
               }
               src={blobUrl}
               playsInline
               onTimeUpdate={onVideoTimeUpdate}
               onEnded={() => {
-                if (clip) advanceOrStop(clip);
+                const active = clipRef.current;
+                if (!active) return;
+                const end = active.timelineStartMs + clipDurationMs(active);
+                const next = sortedClipsRef.current.find(
+                  (c) => c.timelineStartMs >= end - 1,
+                );
+                if (next) onTime(next.timelineStartMs);
+                else if (onPlayingChange) onPlayingChange(false);
+                else onTogglePlay();
               }}
             />
           </>

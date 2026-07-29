@@ -17,8 +17,18 @@ export interface YoutubeMeta {
   tags: string[];
 }
 
+export interface ClipYoutubeMeta {
+  clipId: string;
+  filename: string;
+  title: string;
+  description: string;
+  hashtags: string[];
+  transcriptPreview?: string;
+}
+
 export interface ProjectMetadata {
   youtube?: YoutubeMeta;
+  clipMeta?: ClipYoutubeMeta[];
 }
 
 export interface ProjectRow {
@@ -61,10 +71,12 @@ export async function listProjects(
   const sb = userClient(token);
   const { data, error } = await sb
     .from("projects")
-    .select("*")
+    .select("id,user_id,title,kind,duration_ms,metadata,created_at,updated_at")
     .order("updated_at", { ascending: false });
   if (error) throw new Error(error.message);
-  return ((data ?? []) as ProjectRow[]).map(normalizeRow);
+  return ((data ?? []) as Omit<ProjectRow, "timeline">[]).map((row) =>
+    normalizeRow({ ...row, timeline: emptyTimeline() } as ProjectRow),
+  );
 }
 
 export async function getProject(

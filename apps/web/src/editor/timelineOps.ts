@@ -57,11 +57,16 @@ function localAt(c: VideoClip, timeMs: number): number {
   return roundMs(c.inMs + (timeMs - c.timelineStartMs) * speedOf(c));
 }
 
+/** Shallow copy of clips array (clip objects reused unless replaced). */
+function copyClips(timeline: Timeline): VideoClip[] {
+  return getVideoClips(timeline).slice();
+}
+
 export function splitAtPlayhead(
   timeline: Timeline,
   timeMs: number,
 ): Timeline | null {
-  const clips = structuredClone(getVideoClips(timeline));
+  const clips = copyClips(timeline);
   const idx = clips.findIndex((c) => {
     const end = c.timelineStartMs + clipDurationMs(c);
     return timeMs > c.timelineStartMs + 50 && timeMs < end - 50;
@@ -82,18 +87,18 @@ export function splitAtPlayhead(
 }
 
 export function deleteClip(timeline: Timeline, clipId: string): Timeline | null {
-  const clips = getVideoClips(timeline).filter((c) => c.id !== clipId);
-  if (clips.length === getVideoClips(timeline).length) return null;
-  return mirrorAudio(timeline, clips);
+  const clips = getVideoClips(timeline);
+  const next = clips.filter((c) => c.id !== clipId);
+  if (next.length === clips.length) return null;
+  return mirrorAudio(timeline, next);
 }
 
-/** Apagar à esquerda: remove do início do clipe até o playhead. */
 export function deleteLeftOfPlayhead(
   timeline: Timeline,
   clipId: string,
   timeMs: number,
 ): Timeline | null {
-  const clips = structuredClone(getVideoClips(timeline));
+  const clips = copyClips(timeline);
   const idx = clips.findIndex((c) => c.id === clipId);
   if (idx < 0) return null;
   const c = clips[idx]!;
@@ -108,13 +113,12 @@ export function deleteLeftOfPlayhead(
   return mirrorAudio(timeline, clips);
 }
 
-/** Apagar à direita: remove do playhead até o fim do clipe. */
 export function deleteRightOfPlayhead(
   timeline: Timeline,
   clipId: string,
   timeMs: number,
 ): Timeline | null {
-  const clips = structuredClone(getVideoClips(timeline));
+  const clips = copyClips(timeline);
   const idx = clips.findIndex((c) => c.id === clipId);
   if (idx < 0) return null;
   const c = clips[idx]!;
@@ -141,7 +145,7 @@ export function deleteAllBefore(
     );
     if (!overlaps) return null;
   }
-  const trimmed = structuredClone(kept).map((c) => {
+  const trimmed = kept.map((c) => {
     if (
       c.timelineStartMs < timeMs &&
       c.timelineStartMs + clipDurationMs(c) > timeMs
@@ -166,7 +170,7 @@ export function deleteAllAfter(
   );
   const kept = clips.filter((c) => c.timelineStartMs < timeMs);
   if (kept.length === clips.length && !overlaps) return null;
-  const trimmed = structuredClone(kept).map((c) => {
+  const trimmed = kept.map((c) => {
     if (c.timelineStartMs + clipDurationMs(c) > timeMs) {
       return { ...c, outMs: localAt(c, timeMs) };
     }
@@ -179,7 +183,7 @@ export function duplicateClip(
   timeline: Timeline,
   clipId: string,
 ): { timeline: Timeline; newId: string } | null {
-  const clips = structuredClone(getVideoClips(timeline));
+  const clips = copyClips(timeline);
   const idx = clips.findIndex((c) => c.id === clipId);
   if (idx < 0) return null;
   const c = clips[idx]!;
@@ -195,7 +199,7 @@ export function duplicateClip(
 }
 
 export function snapClipsToStart(timeline: Timeline): Timeline | null {
-  const clips = structuredClone(getVideoClips(timeline));
+  const clips = getVideoClips(timeline);
   if (clips.length === 0) return null;
   const minStart = Math.min(...clips.map((c) => c.timelineStartMs));
   if (minStart === 0) return null;
@@ -209,21 +213,24 @@ export function snapClipsToStart(timeline: Timeline): Timeline | null {
 }
 
 export function closeGaps(timeline: Timeline): Timeline | null {
-  const clips = structuredClone(getVideoClips(timeline)).sort(
-    (a, b) => a.timelineStartMs - b.timelineStartMs,
-  );
+  const clips = getVideoClips(timeline)
+    .slice()
+    .sort((a, b) => a.timelineStartMs - b.timelineStartMs);
   if (clips.length === 0) return null;
   let t = 0;
   let changed = false;
-  for (const c of clips) {
+  const next = clips.map((c) => {
     if (c.timelineStartMs !== t) {
-      c.timelineStartMs = t;
       changed = true;
+      const moved = { ...c, timelineStartMs: t };
+      t += clipDurationMs(moved);
+      return moved;
     }
     t += clipDurationMs(c);
-  }
+    return c;
+  });
   if (!changed) return null;
-  return mirrorAudio(timeline, clips);
+  return mirrorAudio(timeline, next);
 }
 
 export function nudgeClip(

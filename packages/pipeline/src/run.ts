@@ -82,7 +82,7 @@ export async function runPipeline(
 
   if (options.removeSilence) {
     params.onProgress("Removendo silêncios", 45);
-    current = await removeSilence(
+    const silence = await removeSilence(
       current,
       params.workDir,
       options.silenceThresholdDb ?? DEFAULT_OPTIONS.silenceThresholdDb,
@@ -90,6 +90,7 @@ export async function runPipeline(
         DEFAULT_OPTIONS.silenceMinDurationSeconds,
       () => params.onProgress("Removendo silêncios", 50),
     );
+    current = silence.path;
   }
 
   let clips: string[];

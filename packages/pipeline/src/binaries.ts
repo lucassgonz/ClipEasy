@@ -53,16 +53,19 @@ export function runCommand(
   args: string[],
   onStderr?: (chunk: string) => void,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  const STDERR_CAP = 64_000;
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (buf: Buffer) => {
       stdout += buf.toString();
+      if (stdout.length > STDERR_CAP) stdout = stdout.slice(-STDERR_CAP);
     });
     child.stderr.on("data", (buf: Buffer) => {
       const text = buf.toString();
       stderr += text;
+      if (stderr.length > STDERR_CAP) stderr = stderr.slice(-STDERR_CAP);
       onStderr?.(text);
     });
     child.on("error", reject);

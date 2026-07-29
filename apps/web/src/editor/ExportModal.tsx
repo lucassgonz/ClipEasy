@@ -12,6 +12,7 @@ import type {
   ExportQuality,
   Resolution,
 } from "../types";
+import { StatusPopup, type StatusPopupState } from "./StatusPopup";
 
 async function downloadAuthed(urlPath: string, filename: string) {
   const session = await getSession();
@@ -73,7 +74,7 @@ export function ExportModal({
   );
   const [burnCaptions, setBurnCaptions] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<StatusPopupState | null>(null);
   const [job, setJob] = useState<ExportJob | null>(null);
 
   useEffect(() => {
@@ -119,8 +120,12 @@ export function ExportModal({
 
   async function runExport() {
     setBusy(true);
-    setError(null);
     setJob(null);
+    setStatus({
+      kind: "processing",
+      title: "Exportando",
+      message: "Preparando arquivos…",
+    });
     try {
       const options: ExportOptions = {
         exportHorizontal: outputs === "both" || outputs === "h",
@@ -138,11 +143,31 @@ export function ExportModal({
       for (;;) {
         const next = await fetchExportJob(jobId);
         setJob(next);
-        if (next.status === "done" || next.status === "error") break;
+        setStatus({
+          kind: "processing",
+          title: "Exportando",
+          message: `${next.progress.step} — ${next.progress.percent}%`,
+        });
+        if (next.status === "done") {
+          if (next.error) throw new Error(next.error);
+          setStatus({
+            kind: "success",
+            title: "Exportação concluída",
+            message: `${next.outputs.length} arquivo(s) prontos para download.`,
+          });
+          break;
+        }
+        if (next.status === "error") {
+          throw new Error(next.error || "Falha na exportação");
+        }
         await new Promise((r) => setTimeout(r, 1000));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setStatus({
+        kind: "error",
+        title: "Falha na exportação",
+        message: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setBusy(false);
     }
@@ -150,6 +175,7 @@ export function ExportModal({
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <StatusPopup status={status} onClose={() => setStatus(null)} />
       <div
         className="modal export-modal"
         role="dialog"
@@ -302,25 +328,74 @@ export function ExportModal({
           </label>
         </div>
 
-        {busy && <p className="progress-label">Exportando…</p>}
-        {error && <p className="error">{error}</p>}
-        {job && (
+        {job && job.outputs.length > 0 && (
           <div className="export-box">
-            <p>
-              {job.progress.step} — {job.progress.percent}%
-            </p>
-            {job.error && <p className="error">{job.error}</p>}
+            <p>Downloads ({job.outputs.length} arquivos)</p>
+            <button
+              type="button"
+              className="cta small"
+              onClick={() => {
+                void (async () => {
+                  const zipUrl =
+                    job.zipUrl ??
+                    job.outputs[0]!.url.replace(/\/[^/]+$/, "/zip");
+                  setStatus({
+                    kind: "processing",
+                    title: "Baixar todos",
+                    message: `Compactando ${job.outputs.length} arquivos…`,
+                  });
+                  try {
+                    await downloadAuthed(zipUrl, "clipEasy-export.zip");
+                    setStatus({
+                      kind: "success",
+                      title: "Download concluído",
+                      message: `ZIP com ${job.outputs.length} arquivo(s) baixado.`,
+                    });
+                  } catch (err) {
+                    setStatus({
+                      kind: "error",
+                      title: "Falha no download",
+                      message:
+                        err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                })();
+              }}
+            >
+              Baixar todos (.zip)
+            </button>
             <ul>
               {job.outputs.map((o) => (
                 <li key={o.name}>
                   <button
                     type="button"
                     className="ghost"
-                    onClick={() =>
-                      void downloadAuthed(o.url, o.name).catch((e: Error) =>
-                        setError(e.message),
-                      )
-                    }
+                    onClick={() => {
+                      void (async () => {
+                        setStatus({
+                          kind: "processing",
+                          title: "Download",
+                          message: `Baixando ${o.label}…`,
+                        });
+                        try {
+                          await downloadAuthed(o.url, o.name);
+                          setStatus({
+                            kind: "success",
+                            title: "Download concluído",
+                            message: `${o.label} baixado.`,
+                          });
+                        } catch (err) {
+                          setStatus({
+                            kind: "error",
+                            title: "Falha no download",
+                            message:
+                              err instanceof Error
+                                ? err.message
+                                : String(err),
+                          });
+                        }
+                      })();
+                    }}
                   >
                     Baixar {o.label}
                   </button>

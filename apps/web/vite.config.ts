@@ -15,6 +15,9 @@ export default defineConfig({
         target: "http://127.0.0.1:8787",
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api/, ""),
+        // Silence/export can run for many minutes on long videos.
+        timeout: 0,
+        proxyTimeout: 0,
       },
     },
   },

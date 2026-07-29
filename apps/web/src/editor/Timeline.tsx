@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   clipDurationMs,
   recomputeDuration,
@@ -8,7 +8,9 @@ import {
   type VideoClip,
 } from "../types";
 
-const PX_PER_MS_BASE = 0.08;
+/** Default density for short clips (~80px per second). */
+const PX_PER_MS_DEFAULT = 0.08;
+const MIN_PX_PER_MS = 0.00015; // fits ~2h in ~1000px
 
 function roundMs(n: number): number {
   return Math.max(0, Math.round(n));
@@ -17,6 +19,7 @@ function roundMs(n: number): number {
 export function TimelineView({
   timeline,
   timeMs,
+  playing = false,
   selectedId,
   onSelect,
   onChange,
@@ -25,19 +28,92 @@ export function TimelineView({
 }: {
   timeline: Timeline;
   timeMs: number;
+  playing?: boolean;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onChange: (timeline: Timeline) => void;
   onSeek: (ms: number) => void;
   onSplit?: () => void;
 }) {
-  const [zoom, setZoom] = useState(1);
-  const pxPerMs = PX_PER_MS_BASE * zoom;
-  const width = Math.max(800, (timeline.durationMs || 10000) * pxPerMs + 200);
   const railRef = useRef<HTMLDivElement>(null);
   const scrubbing = useRef(false);
   const timelineRef = useRef(timeline);
   timelineRef.current = timeline;
+  const [railWidth, setRailWidth] = useState(800);
+  const [pxPerMs, setPxPerMs] = useState(PX_PER_MS_DEFAULT);
+  const fittedForDuration = useRef<number | null>(null);
+  /** Local draft while dragging — avoids flooding parent history/save. */
+  const draftClips = useRef<VideoClip[] | null>(null);
+  const draftCues = useRef<CaptionCue[] | null>(null);
+  const [, bumpDraft] = useState(0);
+  const seekRaf = useRef(0);
+
+  const durationMs = Math.max(timeline.durationMs || 10000, 1000);
+  const fitPxPerMs = Math.max(
+    MIN_PX_PER_MS,
+    (Math.max(railWidth, 200) - 32) / durationMs,
+  );
+  const maxPxPerMs = Math.max(PX_PER_MS_DEFAULT * 4, fitPxPerMs * 20);
+  const width = Math.max(railWidth - 8, durationMs * pxPerMs + 40);
+
+  useEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    const apply = () => setRailWidth(el.clientWidth || 800);
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Keep the yellow playhead visible while the video plays.
+  useEffect(() => {
+    if (!playing || scrubbing.current) return;
+    const el = railRef.current;
+    if (!el) return;
+    const x = timeMs * pxPerMs;
+    const pad = Math.min(120, el.clientWidth * 0.25);
+    const left = el.scrollLeft;
+    const right = left + el.clientWidth;
+    if (x < left + pad) {
+      el.scrollLeft = Math.max(0, x - pad);
+    } else if (x > right - pad) {
+      el.scrollLeft = Math.max(0, x - el.clientWidth + pad);
+    }
+  }, [timeMs, playing, pxPerMs]);
+
+  useEffect(() => {
+    const fit = Math.max(
+      MIN_PX_PER_MS,
+      (Math.max(railWidth, 200) - 32) / durationMs,
+    );
+    const needsFit =
+      fittedForDuration.current !== durationMs ||
+      durationMs * pxPerMs > railWidth * 1.05;
+    if (needsFit && durationMs > 120_000) {
+      setPxPerMs(fit);
+      fittedForDuration.current = durationMs;
+    } else if (fittedForDuration.current === null) {
+      fittedForDuration.current = durationMs;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [durationMs, railWidth]);
+
+  const zoomSlider = useMemo(() => {
+    const min = fitPxPerMs;
+    const max = maxPxPerMs;
+    if (max <= min) return 0;
+    const t = (pxPerMs - min) / (max - min);
+    return Math.round(Math.min(100, Math.max(0, t * 100)));
+  }, [pxPerMs, fitPxPerMs, maxPxPerMs]);
+
+  function setZoomFromSlider(value: number) {
+    const t = value / 100;
+    const min = fitPxPerMs;
+    const max = maxPxPerMs;
+    const eased = t * t;
+    setPxPerMs(min + (max - min) * eased);
+  }
 
   const dragBase = useRef<{
     id: string;
@@ -118,13 +194,42 @@ export function TimelineView({
   }
 
   function currentVideoClips(): VideoClip[] {
+    if (draftClips.current) return draftClips.current;
     const t = timelineRef.current.tracks.find((x) => x.type === "video");
     return t && t.type === "video" ? t.clips : [];
   }
 
   function currentCues(): CaptionCue[] {
+    if (draftCues.current) return draftCues.current;
     const t = timelineRef.current.tracks.find((x) => x.type === "captions");
     return t && t.type === "captions" ? t.cues : [];
+  }
+
+  function beginDraftVideo() {
+    if (!draftClips.current) {
+      const t = timelineRef.current.tracks.find((x) => x.type === "video");
+      draftClips.current =
+        t && t.type === "video" ? t.clips.map((c) => ({ ...c })) : [];
+    }
+  }
+
+  function beginDraftCues() {
+    if (!draftCues.current) {
+      const t = timelineRef.current.tracks.find((x) => x.type === "captions");
+      draftCues.current =
+        t && t.type === "captions" ? t.cues.map((c) => ({ ...c })) : [];
+    }
+  }
+
+  function commitDraft() {
+    if (draftClips.current) {
+      commitVideoClips(draftClips.current);
+      draftClips.current = null;
+    }
+    if (draftCues.current) {
+      commitCues(draftCues.current);
+      draftCues.current = null;
+    }
   }
 
   function splitAtPlayhead() {
@@ -167,51 +272,47 @@ export function TimelineView({
     const deltaMs = totalDxPx / pxPerMs;
 
     if (base.kind === "cue") {
+      beginDraftCues();
+      const cues = draftCues.current!;
       const dur = (base.endMs ?? 0) - (base.startMs ?? 0);
       const startMs = Math.max(0, roundMs((base.startMs ?? 0) + deltaMs));
-      commitCues(
-        currentCues().map((cue) =>
-          cue.id === base.id
-            ? { ...cue, startMs, endMs: startMs + Math.max(100, dur) }
-            : cue,
-        ),
+      draftCues.current = cues.map((cue) =>
+        cue.id === base.id
+          ? { ...cue, startMs, endMs: startMs + Math.max(100, dur) }
+          : cue,
       );
+      bumpDraft((n) => n + 1);
       return;
     }
 
-    commitVideoClips(
-      currentVideoClips().map((c) => {
-        if (c.id !== base.id) return c;
-        if (base.kind === "move") {
-          return {
-            ...c,
-            timelineStartMs: Math.max(
-              0,
-              roundMs(base.timelineStartMs + deltaMs),
-            ),
-          };
-        }
-        if (base.kind === "in") {
-          const inMs = Math.min(
-            base.outMs - 100,
-            Math.max(0, roundMs(base.inMs + deltaMs)),
-          );
-          const shift = inMs - base.inMs;
-          return {
-            ...c,
-            inMs,
-            timelineStartMs: Math.max(
-              0,
-              roundMs(base.timelineStartMs + shift),
-            ),
-          };
-        }
+    beginDraftVideo();
+    const clips = draftClips.current!;
+    draftClips.current = clips.map((c) => {
+      if (c.id !== base.id) return c;
+      if (base.kind === "move") {
         return {
           ...c,
-          outMs: Math.max(base.inMs + 100, roundMs(base.outMs + deltaMs)),
+          timelineStartMs: Math.max(0, roundMs(base.timelineStartMs + deltaMs)),
         };
-      }),
-    );
+      }
+      if (base.kind === "in") {
+        const inMs = Math.min(
+          base.outMs - 100,
+          Math.max(0, roundMs(base.inMs + deltaMs)),
+        );
+        const shift = inMs - base.inMs;
+        return {
+          ...c,
+          inMs,
+          timelineStartMs: Math.max(0, roundMs(base.timelineStartMs + shift)),
+        };
+      }
+      return {
+        ...c,
+        outMs: Math.max(base.inMs + 100, roundMs(base.outMs + deltaMs)),
+      };
+    });
+    bumpDraft((n) => n + 1);
   }
 
   const selectedCue = useMemo(() => {
@@ -224,22 +325,40 @@ export function TimelineView({
       ? video.clips.find((c) => c.id === selectedId)
       : undefined;
 
+  const durationLabel =
+    durationMs >= 3_600_000
+      ? `${(durationMs / 3_600_000).toFixed(1)}h`
+      : durationMs >= 60_000
+        ? `${Math.round(durationMs / 60_000)} min`
+        : `${Math.round(durationMs / 1000)}s`;
+
   return (
     <div className="timeline">
       <div className="timeline-toolbar">
         <button type="button" onClick={splitAtPlayhead}>
           Dividir no playhead
         </button>
-        <label>
+        <button
+          type="button"
+          onClick={() => {
+            setPxPerMs(fitPxPerMs);
+            fittedForDuration.current = durationMs;
+          }}
+          title="Mostrar o vídeo inteiro na largura da timeline"
+        >
+          Ajustar zoom
+        </button>
+        <label className="timeline-zoom-label">
           Zoom
           <input
             type="range"
-            min={0.4}
-            max={3}
-            step={0.1}
-            value={zoom}
-            onChange={(e) => setZoom(Number(e.target.value))}
+            min={0}
+            max={100}
+            step={1}
+            value={zoomSlider}
+            onChange={(e) => setZoomFromSlider(Number(e.target.value))}
           />
+          <span className="hint">{durationLabel}</span>
         </label>
         {selectedVideo && (
           <label>
@@ -280,7 +399,9 @@ export function TimelineView({
           }}
           onPointerMove={(e) => {
             if (!scrubbing.current) return;
-            onSeek(msFromClientX(e.clientX));
+            const ms = msFromClientX(e.clientX);
+            if (seekRaf.current) cancelAnimationFrame(seekRaf.current);
+            seekRaf.current = requestAnimationFrame(() => onSeek(ms));
           }}
           onPointerUp={() => {
             scrubbing.current = false;
@@ -288,14 +409,20 @@ export function TimelineView({
           onPointerCancel={() => {
             scrubbing.current = false;
           }}
+          onWheel={(e) => {
+            if (!e.ctrlKey && !e.metaKey) return;
+            e.preventDefault();
+            const factor = e.deltaY > 0 ? 0.9 : 1.1;
+            setPxPerMs((p) =>
+              Math.min(maxPxPerMs, Math.max(fitPxPerMs, p * factor)),
+            );
+          }}
         >
           <div className="timeline-inner" style={{ width }}>
             <div className="playhead" style={{ left: timeMs * pxPerMs }} />
 
             <div className="track-lane">
-              {video &&
-                video.type === "video" &&
-                video.clips.map((c) => (
+              {currentVideoClips().map((c) => (
                   <ClipBlock
                     key={c.id}
                     left={c.timelineStartMs * pxPerMs}
@@ -305,26 +432,29 @@ export function TimelineView({
                     color="video"
                     onSelect={() => onSelect(c.id)}
                     onGestureStart={(kind) => {
+                      beginDraftVideo();
+                      const src = draftClips.current!.find((x) => x.id === c.id) ?? c;
                       dragBase.current = {
                         id: c.id,
                         kind,
-                        timelineStartMs: c.timelineStartMs,
-                        inMs: c.inMs,
-                        outMs: c.outMs,
+                        timelineStartMs: src.timelineStartMs,
+                        inMs: src.inMs,
+                        outMs: src.outMs,
                       };
                     }}
                     onGestureDelta={applyDragDelta}
                     onGestureEnd={() => {
                       dragBase.current = null;
+                      commitDraft();
                     }}
                   />
                 ))}
             </div>
 
             <div className="track-lane">
-              {audio &&
-                audio.type === "audio" &&
-                audio.clips.map((c) => (
+              {(draftClips.current ??
+                (audio && audio.type === "audio" ? audio.clips : [])
+              ).map((c) => (
                   <ClipBlock
                     key={c.id}
                     left={c.timelineStartMs * pxPerMs}
@@ -338,9 +468,7 @@ export function TimelineView({
             </div>
 
             <div className="track-lane">
-              {captions &&
-                captions.type === "captions" &&
-                captions.cues.map((c) => (
+              {currentCues().map((c) => (
                   <ClipBlock
                     key={c.id}
                     left={c.startMs * pxPerMs}
@@ -350,19 +478,22 @@ export function TimelineView({
                     color="caption"
                     onSelect={() => onSelect(c.id)}
                     onGestureStart={() => {
+                      beginDraftCues();
+                      const src = draftCues.current!.find((x) => x.id === c.id) ?? c;
                       dragBase.current = {
                         id: c.id,
                         kind: "cue",
                         timelineStartMs: 0,
                         inMs: 0,
                         outMs: 0,
-                        startMs: c.startMs,
-                        endMs: c.endMs,
+                        startMs: src.startMs,
+                        endMs: src.endMs,
                       };
                     }}
                     onGestureDelta={applyDragDelta}
                     onGestureEnd={() => {
                       dragBase.current = null;
+                      commitDraft();
                     }}
                   />
                 ))}
@@ -455,7 +586,7 @@ function ClipBlock({
   return (
     <div
       className={`clip ${color} ${selected ? "selected" : ""}`}
-      style={{ left, width: Math.max(width, 8) }}
+      style={{ left, width: Math.max(width, 4) }}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         if (!canEdit) {

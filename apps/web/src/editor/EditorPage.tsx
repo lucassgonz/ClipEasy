@@ -6,6 +6,7 @@ import { EditToolbar } from "./EditToolbar";
 import { ExportModal } from "./ExportModal";
 import { Preview } from "./Preview";
 import { SidePanel } from "./SidePanel";
+import { StatusPopup, type StatusPopupState } from "./StatusPopup";
 import { TimelineView } from "./Timeline";
 import {
   closeGaps,
@@ -42,6 +43,7 @@ export function EditorPage({
   const [playing, setPlaying] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<StatusPopupState | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [previewVertical, setPreviewVertical] = useState(false);
   const [cropFocusX, setCropFocusX] = useState(0.5);
@@ -77,7 +79,8 @@ export function EditorPage({
 
   function scheduleSave(next: Project, pushHistory = true) {
     if (pushHistory && !applyingHistory.current && project) {
-      history.current.push(structuredClone(project.timeline));
+      // Timelines are treated as immutable after commit — store ref, no deep clone.
+      history.current.push(project.timeline);
       if (history.current.length > HISTORY_MAX) history.current.shift();
       future.current = [];
       bumpHistory();
@@ -88,7 +91,13 @@ export function EditorPage({
       void saveProject(next.id, {
         title: next.title,
         timeline: next.timeline,
-      }).catch((e: Error) => setError(e.message));
+      }).catch((e: Error) =>
+        setStatus({
+          kind: "error",
+          title: "Falha ao salvar",
+          message: e.message,
+        }),
+      );
     }, 600);
   }
 
@@ -114,7 +123,7 @@ export function EditorPage({
     const cur = projectRef.current;
     if (!cur || history.current.length === 0) return;
     const prev = history.current.pop()!;
-    future.current.push(structuredClone(cur.timeline));
+    future.current.push(cur.timeline);
     bumpHistory();
     applyingHistory.current = true;
     applyTimeline(prev, false);
@@ -125,7 +134,7 @@ export function EditorPage({
     const cur = projectRef.current;
     if (!cur || future.current.length === 0) return;
     const next = future.current.pop()!;
-    history.current.push(structuredClone(cur.timeline));
+    history.current.push(cur.timeline);
     bumpHistory();
     applyingHistory.current = true;
     applyTimeline(next, false);
@@ -317,7 +326,14 @@ export function EditorPage({
   if (error && !project) {
     return (
       <div className="editor-page">
-        <p className="error">{error}</p>
+        <StatusPopup
+          status={{
+            kind: "error",
+            title: "Não foi possível abrir o projeto",
+            message: error,
+          }}
+          onClose={onBack}
+        />
         <button type="button" onClick={onBack}>
           Voltar
         </button>
@@ -333,6 +349,7 @@ export function EditorPage({
 
   return (
     <div className="editor-page">
+      <StatusPopup status={status} onClose={() => setStatus(null)} />
       <header className="editor-top">
         <button type="button" className="ghost" onClick={onBack}>
           ← Projetos
@@ -510,8 +527,20 @@ export function EditorPage({
               ) : (
                 <SidePanel
                   project={project}
+                  selectedClipId={selectedId}
                   onProject={(p) => {
                     scheduleSave(p, true);
+                    setSelectedId((id) => {
+                      if (!id) return null;
+                      const track = p.timeline.tracks.find(
+                        (t) => t.type === "video",
+                      );
+                      if (!track || track.type !== "video") return null;
+                      return track.clips.some((c) => c.id === id) ? id : null;
+                    });
+                    setTimeMs((t) =>
+                      Math.min(t, Math.max(0, p.timeline.durationMs || 0)),
+                    );
                   }}
                   onOpenExport={() => setExportOpen(true)}
                 />
@@ -522,6 +551,7 @@ export function EditorPage({
         <TimelineView
           timeline={project.timeline}
           timeMs={timeMs}
+          playing={playing}
           selectedId={selectedId}
           onSelect={selectClip}
           onChange={onTimeline}
@@ -532,7 +562,6 @@ export function EditorPage({
           onSplit={() => runOp(splitAtPlayhead(project.timeline, timeMs))}
         />
       </div>
-      {error && <p className="error">{error}</p>}
 
       <ExportModal
         projectId={project.id}
