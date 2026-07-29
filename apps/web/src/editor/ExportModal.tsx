@@ -41,6 +41,9 @@ export function ExportModal({
   initialCropFocusX = 0.5,
   framingMode = "manual",
   cropFocusTrack,
+  captionStyle = "pop",
+  captionAvoidFaces = true,
+  captionAnchorTrack,
 }: {
   projectId: string;
   defaultFps: number;
@@ -55,6 +58,9 @@ export function ExportModal({
   initialCropFocusX?: number;
   framingMode?: "manual" | "auto";
   cropFocusTrack?: ExportOptions["cropFocusTrack"];
+  captionStyle?: ExportOptions["captionStyle"];
+  captionAvoidFaces?: boolean;
+  captionAnchorTrack?: ExportOptions["captionAnchorTrack"];
 }) {
   const [outputs, setOutputs] = useState<"both" | "h" | "v">("both");
   const [verticalMode, setVerticalMode] = useState<"crop" | "blur">(
@@ -155,6 +161,12 @@ export function ExportModal({
         quality,
         audioBitrate,
         burnCaptions,
+        captionStyle,
+        captionAvoidFaces,
+        captionAnchorTrack:
+          captionAvoidFaces && captionAnchorTrack && captionAnchorTrack.length > 0
+            ? captionAnchorTrack
+            : undefined,
       };
       const jobId = await startExport(projectId, options);
       activeJobId.current = jobId;
@@ -392,6 +404,14 @@ export function ExportModal({
             />
             <span>Gravar legendas no vídeo</span>
           </label>
+
+          {burnCaptions && (
+            <p className="hint">
+              Estilo: {captionStyle}
+              {captionAvoidFaces ? " · evita rostos" : ""}
+              {" "}(ajuste no preview)
+            </p>
+          )}
         </div>
 
         {job && job.outputs.length > 0 && (

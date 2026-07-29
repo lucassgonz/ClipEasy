@@ -31,11 +31,21 @@ export interface CropFocusKeyframe {
   x: number;
 }
 
+export type CaptionStyleId = "clean" | "bold" | "pop" | "boxed";
+
+export interface CaptionAnchorKeyframe {
+  tMs: number;
+  place: "top" | "bottom";
+}
+
 export interface ProjectMetadata {
   youtube?: YoutubeMeta;
   clipMeta?: ClipYoutubeMeta[];
   cropFocusTrack?: CropFocusKeyframe[];
   framingMode?: "manual" | "auto";
+  captionStyle?: CaptionStyleId;
+  captionAvoidFaces?: boolean;
+  captionAnchorTrack?: CaptionAnchorKeyframe[];
 }
 
 export interface ProjectRow {

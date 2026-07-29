@@ -216,6 +216,12 @@ export function SidePanel({
         everySeconds: opts.everySeconds ?? splitSec,
         applyToTimeline: opts.applyToTimeline,
         exportExistingClips: opts.exportExistingClips,
+        // Shorts/Reels/TikTok: always vertical 9:16 with framing track when available.
+        exportVertical: true,
+        exportHorizontal: false,
+        verticalMode: "crop",
+        cropFocusTrack: project.metadata?.cropFocusTrack,
+        quality: "medium",
       });
       activeJobId.current = jobId;
       if (opts.applyToTimeline) {
@@ -456,7 +462,7 @@ export function SidePanel({
               })
             }
           >
-            Exportar todos os clipes
+            Exportar todos os clipes (9:16)
           </button>
           <details className="recipe-more">
             <summary>Dividir de novo</summary>
@@ -657,11 +663,14 @@ export function SidePanel({
           <label className="field compact">
             <span>Hashtags</span>
             <input
-              value={youtube.hashtags.join(" ")}
+              value={youtube.hashtags.join(", ")}
               onChange={(e) =>
                 patchYoutube({
                   ...youtube,
-                  hashtags: e.target.value.split(/\s+/).filter(Boolean),
+                  hashtags: e.target.value
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter(Boolean),
                 })
               }
             />
@@ -670,7 +679,7 @@ export function SidePanel({
             type="button"
             className="ghost"
             onClick={() =>
-              void copyText(youtube.hashtags.join(" ")).then(() =>
+              void copyText(youtube.hashtags.join(", ")).then(() =>
                 setCopied("hashtags"),
               )
             }
@@ -815,10 +824,13 @@ export function SidePanel({
           <label className="field compact">
             <span>Hashtags</span>
             <input
-              value={activeMeta.hashtags.join(" ")}
+              value={activeMeta.hashtags.join(", ")}
               onChange={(e) =>
                 patchActiveMeta({
-                  hashtags: e.target.value.split(/\s+/).filter(Boolean),
+                  hashtags: e.target.value
+                    .split(",")
+                    .map((t) => t.trim())
+                    .filter(Boolean),
                 })
               }
             />
@@ -827,7 +839,7 @@ export function SidePanel({
             type="button"
             className="ghost"
             onClick={() =>
-              void copyText(activeMeta.hashtags.join(" ")).then(() =>
+              void copyText(activeMeta.hashtags.join(", ")).then(() =>
                 setCopied("hashtags"),
               )
             }

@@ -6,6 +6,7 @@ import {
 import {
   clipSpeed,
   findActiveVideoClip,
+  type CaptionAnchorKeyframe,
   type CropFocusKeyframe,
   type Timeline,
 } from "../types";
@@ -101,15 +102,41 @@ function boxCenterX(d: Detection, frameW: number): number {
   return clamp01((box.originX + box.width / 2) / frameW);
 }
 
-function pickPrimaryFace(
+function boxBottomY(d: Detection, frameH: number): number {
+  const box = d.boundingBox;
+  if (!box || frameH <= 0) return 0.5;
+  return clamp01((box.originY + box.height) / frameH);
+}
+
+/** If the face reaches into the lower band, park captions on top. */
+export function captionPlaceFromFaceBottom(faceBottomY: number): "top" | "bottom" {
+  return faceBottomY >= 0.55 ? "top" : "bottom";
+}
+
+export function interpolateCaptionPlace(
+  track: CaptionAnchorKeyframe[] | undefined,
+  timeMs: number,
+  fallback: "top" | "bottom" = "bottom",
+): "top" | "bottom" {
+  if (!track || track.length === 0) return fallback;
+  if (timeMs <= track[0]!.tMs) return track[0]!.place;
+  const last = track[track.length - 1]!;
+  if (timeMs >= last.tMs) return last.place;
+  let best = track[0]!;
+  for (const k of track) {
+    if (k.tMs <= timeMs) best = k;
+    else break;
+  }
+  return best.place;
+}
+
+function pickPrimaryDetection(
   detections: Detection[],
   frameW: number,
   prevFaceX: number | null,
-): number | null {
+): Detection | null {
   if (detections.length === 0) return null;
-  if (detections.length === 1) {
-    return boxCenterX(detections[0]!, frameW);
-  }
+  if (detections.length === 1) return detections[0]!;
 
   if (prevFaceX != null) {
     let best = detections[0]!;
@@ -123,21 +150,15 @@ function pickPrimaryFace(
       }
     }
     if (bestDist > 0.35) {
-      const largest = detections.reduce((a, b) =>
-        boxArea(a) >= boxArea(b) ? a : b,
-      );
-      return boxCenterX(largest, frameW);
+      return detections.reduce((a, b) => (boxArea(a) >= boxArea(b) ? a : b));
     }
-    return boxCenterX(best, frameW);
+    return best;
   }
 
-  const largest = detections.reduce((a, b) =>
-    boxArea(a) >= boxArea(b) ? a : b,
-  );
-  return boxCenterX(largest, frameW);
+  return detections.reduce((a, b) => (boxArea(a) >= boxArea(b) ? a : b));
 }
 
-function sparsify(track: CropFocusKeyframe[]): CropFocusKeyframe[] {
+function sparsifyFocus(track: CropFocusKeyframe[]): CropFocusKeyframe[] {
   if (track.length <= 2) return track;
   const out: CropFocusKeyframe[] = [track[0]!];
   for (let i = 1; i < track.length - 1; i += 1) {
@@ -154,6 +175,21 @@ function sparsify(track: CropFocusKeyframe[]): CropFocusKeyframe[] {
     }
   }
   out.push(track[track.length - 1]!);
+  return out;
+}
+
+function sparsifyAnchors(
+  track: CaptionAnchorKeyframe[],
+): CaptionAnchorKeyframe[] {
+  if (track.length <= 1) return track;
+  const out: CaptionAnchorKeyframe[] = [track[0]!];
+  for (let i = 1; i < track.length; i += 1) {
+    const cur = track[i]!;
+    const prev = out[out.length - 1]!;
+    if (cur.place !== prev.place || cur.tMs - prev.tMs >= SPARSIFY_MAX_GAP_MS) {
+      out.push(cur);
+    }
+  }
   return out;
 }
 
@@ -202,13 +238,16 @@ async function loadVideo(url: string): Promise<HTMLVideoElement> {
 }
 
 /**
- * Sample faces along the timeline and build a cropFocusTrack (timeline ms → focus X).
+ * Sample faces along the timeline: crop focus (X) + caption anchors (top/bottom).
  */
 export async function analyzeTimelineCropFocusTrack(
   timeline: Timeline,
   resolveMediaUrl: (assetId: string) => Promise<string>,
   onProgress?: (step: string, percent: number) => void,
-): Promise<CropFocusKeyframe[]> {
+): Promise<{
+  cropFocusTrack: CropFocusKeyframe[];
+  captionAnchorTrack: CaptionAnchorKeyframe[];
+}> {
   onProgress?.("Carregando detector de rostos…", 2);
   const detector = await getDetector();
 
@@ -231,17 +270,20 @@ export async function analyzeTimelineCropFocusTrack(
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("Canvas 2D indisponível");
 
-  const raw: CropFocusKeyframe[] = [];
+  const rawFocus: CropFocusKeyframe[] = [];
+  const rawAnchors: CaptionAnchorKeyframe[] = [];
   let prevFaceX: number | null = null;
   let smoothFocus = 0.5;
   let hadFace = false;
+  let lastPlace: "top" | "bottom" = "bottom";
 
   const steps = Math.max(1, Math.ceil(durMs / SAMPLE_MS));
   for (let i = 0; i < steps; i += 1) {
     const tMs = Math.min(durMs, i * SAMPLE_MS);
     const clip = findActiveVideoClip(timeline, tMs);
     if (!clip) {
-      raw.push({ tMs, x: clamp01(smoothFocus) });
+      rawFocus.push({ tMs, x: clamp01(smoothFocus) });
+      rawAnchors.push({ tMs, place: lastPlace });
     } else {
       const video = await videoFor(clip.assetId);
       const speed = clipSpeed(clip);
@@ -261,18 +303,21 @@ export async function analyzeTimelineCropFocusTrack(
       }
       ctx.drawImage(video, 0, 0, cw, ch);
       const result = detector.detect(canvas);
-      const faceX = pickPrimaryFace(result.detections, cw, prevFaceX);
+      const face = pickPrimaryDetection(result.detections, cw, prevFaceX);
       const srcAspect = frameW / frameH;
 
-      if (faceX != null) {
+      if (face) {
+        const faceX = boxCenterX(face, cw);
         prevFaceX = faceX;
         const mapped = faceXToCropFocus(faceX, srcAspect);
         smoothFocus = hadFace
           ? smoothFocus * (1 - EMA_ALPHA) + mapped * EMA_ALPHA
           : mapped;
         hadFace = true;
+        lastPlace = captionPlaceFromFaceBottom(boxBottomY(face, ch));
       }
-      raw.push({ tMs, x: clamp01(smoothFocus) });
+      rawFocus.push({ tMs, x: clamp01(smoothFocus) });
+      rawAnchors.push({ tMs, place: lastPlace });
     }
 
     if (i % 2 === 0 || i === steps - 1) {
@@ -289,12 +334,33 @@ export async function analyzeTimelineCropFocusTrack(
     el.load();
   }
 
-  const track = sparsify(raw);
+  const cropFocusTrack = sparsifyFocus(rawFocus);
+  const captionAnchorTrack = sparsifyAnchors(rawAnchors);
   onProgress?.("Rastreio concluído", 100);
   if (!hadFace) {
     throw new Error(
       "Nenhum rosto detectado. Tente outro trecho ou ajuste o foco manualmente.",
     );
   }
-  return track;
+  return { cropFocusTrack, captionAnchorTrack };
+}
+
+/** Live caption place from a playing/scrubbed <video> frame. */
+export async function detectCaptionPlaceFromVideo(
+  video: HTMLVideoElement,
+): Promise<"top" | "bottom" | null> {
+  if (!video.videoWidth || !video.videoHeight) return null;
+  const detector = await getDetector();
+  const canvas = document.createElement("canvas");
+  const maxW = 480;
+  const scale = video.videoWidth > maxW ? maxW / video.videoWidth : 1;
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const result = detector.detect(canvas);
+  const face = pickPrimaryDetection(result.detections, canvas.width, null);
+  if (!face) return null;
+  return captionPlaceFromFaceBottom(boxBottomY(face, canvas.height));
 }

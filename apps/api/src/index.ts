@@ -121,6 +121,8 @@ async function whisperTranscribeMp3(
   );
   form.append("model", "whisper-1");
   form.append("response_format", "verbose_json");
+  // Word-level timing so we can burn short, synced caption chunks.
+  form.append("timestamp_granularities[]", "word");
   form.append("timestamp_granularities[]", "segment");
 
   const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
@@ -133,9 +135,82 @@ async function whisperTranscribeMp3(
     throw new Error(`OpenAI Whisper falhou: ${text}`);
   }
   const json = (await res.json()) as {
+    words?: Array<{ word?: string; start?: number; end?: number }>;
     segments?: Array<{ start: number; end: number; text: string }>;
   };
-  return json.segments ?? [];
+
+  const words = (json.words ?? [])
+    .map((w) => ({
+      word: (w.word ?? "").trim(),
+      start: Number(w.start),
+      end: Number(w.end),
+    }))
+    .filter(
+      (w) =>
+        w.word &&
+        Number.isFinite(w.start) &&
+        Number.isFinite(w.end) &&
+        w.end > w.start,
+    );
+
+  if (words.length > 0) {
+    return chunkWordsForCaptions(words, 3);
+  }
+
+  // Fallback: split segment text into ~3-word groups with linear timing.
+  const segs = json.segments ?? [];
+  const out: Array<{ start: number; end: number; text: string }> = [];
+  for (const seg of segs) {
+    out.push(...splitSegmentIntoWordGroups(seg, 3));
+  }
+  return out;
+}
+
+/** Group Whisper words into short on-screen chunks (default 3 words). */
+function chunkWordsForCaptions(
+  words: Array<{ word: string; start: number; end: number }>,
+  groupSize = 3,
+): Array<{ start: number; end: number; text: string }> {
+  const size = Math.max(1, groupSize);
+  const out: Array<{ start: number; end: number; text: string }> = [];
+  for (let i = 0; i < words.length; i += size) {
+    const group = words.slice(i, i + size);
+    const first = group[0]!;
+    const last = group[group.length - 1]!;
+    const text = group.map((w) => w.word).join(" ").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    out.push({
+      start: first.start,
+      end: Math.max(first.start + 0.12, last.end),
+      text,
+    });
+  }
+  return out;
+}
+
+function splitSegmentIntoWordGroups(
+  seg: { start: number; end: number; text: string },
+  groupSize = 3,
+): Array<{ start: number; end: number; text: string }> {
+  const words = seg.text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  if (words.length <= groupSize) {
+    return [{ start: seg.start, end: Math.max(seg.start + 0.12, seg.end), text: words.join(" ") }];
+  }
+  const span = Math.max(0.12, seg.end - seg.start);
+  const out: Array<{ start: number; end: number; text: string }> = [];
+  const groups = Math.ceil(words.length / groupSize);
+  for (let g = 0; g < groups; g += 1) {
+    const slice = words.slice(g * groupSize, (g + 1) * groupSize);
+    const t0 = seg.start + (span * g) / groups;
+    const t1 = seg.start + (span * (g + 1)) / groups;
+    out.push({
+      start: t0,
+      end: Math.max(t0 + 0.12, t1),
+      text: slice.join(" "),
+    });
+  }
+  return out;
 }
 
 async function extractWhisperAudioChunk(
@@ -337,14 +412,15 @@ Responda APENAS JSON válido (sem markdown):
     {
       "index": 0,
       "title": "título ≤ 70 caracteres, chamativo",
-      "description": "descrição 1-3 frases com CTA para YouTube/TikTok/Instagram",
+      "description": "descrição mais longa (4-7 frases): contexto do trecho, tema relacionado, valor para o espectador e CTA para seguir/comentar",
       "hashtags": ["#tag1", "#tag2"]
     }
   ]
 }
 Regras:
 - português do Brasil
-- 5-10 hashtags por item (nicho + alcance)
+- descrição com 4 a 7 frases (cerca de 350–650 caracteres), expandindo o tema da fala (não só um resumo curto)
+- 5-10 hashtags por item (nicho + alcance), sempre com #
 - títulos distintos entre si quando possível
 - OBRIGATÓRIO: retorne exatamente um objeto em "items" para CADA index enviado (${items.map((i) => i.index).join(", ")})
 Itens:
@@ -463,7 +539,7 @@ async function generateClipMetaBatch(
 function formatClipMetaTxt(items: ClipYoutubeMeta[]): string {
   return items
     .map((m) => {
-      const tags = m.hashtags.join(" ");
+      const tags = m.hashtags.join(", ");
       return [
         `=== ${m.filename} ===`,
         `Título: ${m.title}`,
@@ -864,6 +940,9 @@ app.post<{ Params: { id: string } }>(
         cropFocusTrack?: Array<{ tMs: number; x: number }>;
         resolution?: "720p" | "1080p" | "1440p" | "2160p";
         burnCaptions?: boolean;
+        captionStyle?: "clean" | "bold" | "pop" | "boxed";
+        captionAvoidFaces?: boolean;
+        captionAnchorTrack?: Array<{ tMs: number; place: "top" | "bottom" }>;
         fps?: number;
         format?: "mp4" | "mov";
         quality?: "low" | "medium" | "high" | "max";
@@ -875,6 +954,12 @@ app.post<{ Params: { id: string } }>(
         (project.metadata?.framingMode === "auto"
           ? project.metadata?.cropFocusTrack
           : undefined);
+      const captionStyle =
+        body.captionStyle ?? project.metadata?.captionStyle ?? "pop";
+      const captionAvoidFaces =
+        body.captionAvoidFaces ?? project.metadata?.captionAvoidFaces !== false;
+      const captionAnchorTrack =
+        body.captionAnchorTrack ?? project.metadata?.captionAnchorTrack;
 
       const jobId = nanoid(8);
       exportJobs.set(jobId, {
@@ -895,7 +980,13 @@ app.post<{ Params: { id: string } }>(
             assetsDir: assetsDir(project.id),
             workDir: workPath,
             outputDir: path.join(outputDir(project.id), jobId),
-            options: { ...body, cropFocusTrack },
+            options: {
+              ...body,
+              cropFocusTrack,
+              captionStyle,
+              captionAvoidFaces,
+              captionAnchorTrack,
+            },
             onProgress: (step, percent) => {
               markJobProgress(jobId, step, percent);
             },
@@ -950,10 +1041,7 @@ app.post<{ Params: { id: string } }>(
         audioBitrate?: "128k" | "192k" | "320k";
       };
       const cropFocusTrack =
-        body.cropFocusTrack ??
-        (project.metadata?.framingMode === "auto"
-          ? project.metadata?.cropFocusTrack
-          : undefined);
+        body.cropFocusTrack ?? project.metadata?.cropFocusTrack;
       const exportExistingClips = Boolean(body.exportExistingClips);
       const everySeconds = body.everySeconds ?? 60;
       if (!exportExistingClips && everySeconds < 1) {

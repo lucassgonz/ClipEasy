@@ -3,6 +3,8 @@ import { getProject, mediaUrl, saveProject } from "../api";
 import { getSession } from "../lib/supabase";
 import {
   clipDurationMs,
+  type CaptionAnchorKeyframe,
+  type CaptionStyleId,
   type CropFocusKeyframe,
   type Project,
   type Timeline,
@@ -59,6 +61,11 @@ export function EditorPage({
   const [verticalMode, setVerticalMode] = useState<"crop" | "blur">("crop");
   const [framingMode, setFramingMode] = useState<"manual" | "auto">("manual");
   const [cropFocusTrack, setCropFocusTrack] = useState<CropFocusKeyframe[]>([]);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyleId>("pop");
+  const [captionAvoidFaces, setCaptionAvoidFaces] = useState(true);
+  const [captionAnchorTrack, setCaptionAnchorTrack] = useState<
+    CaptionAnchorKeyframe[]
+  >([]);
   const [autoFrameBusy, setAutoFrameBusy] = useState(false);
   const [sideTab, setSideTab] = useState<"clip" | "project">("project");
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -92,6 +99,9 @@ export function EditorPage({
             ? "auto"
             : "manual",
         );
+        setCaptionStyle(p.metadata?.captionStyle ?? "pop");
+        setCaptionAvoidFaces(p.metadata?.captionAvoidFaces !== false);
+        setCaptionAnchorTrack(p.metadata?.captionAnchorTrack ?? []);
       })
       .catch((e: Error) => setError(e.message));
   }, [projectId]);
@@ -124,9 +134,14 @@ export function EditorPage({
   function saveFramingMeta(
     track: CropFocusKeyframe[],
     mode: "manual" | "auto",
+    anchors?: CaptionAnchorKeyframe[],
+    avoidFaces?: boolean,
   ) {
     const cur = projectRef.current;
     if (!cur) return;
+    const captionAnchors = anchors ?? captionAnchorTrack;
+    const nextAvoid = avoidFaces ?? captionAvoidFaces;
+    if (avoidFaces != null) setCaptionAvoidFaces(avoidFaces);
     scheduleSave(
       {
         ...cur,
@@ -134,6 +149,36 @@ export function EditorPage({
           ...cur.metadata,
           cropFocusTrack: track,
           framingMode: mode,
+          captionAnchorTrack: captionAnchors,
+          captionStyle,
+          captionAvoidFaces: nextAvoid,
+        },
+      },
+      false,
+    );
+  }
+
+  function saveCaptionMeta(patch: {
+    captionStyle?: CaptionStyleId;
+    captionAvoidFaces?: boolean;
+    captionAnchorTrack?: CaptionAnchorKeyframe[];
+  }) {
+    const cur = projectRef.current;
+    if (!cur) return;
+    const nextStyle = patch.captionStyle ?? captionStyle;
+    const nextAvoid = patch.captionAvoidFaces ?? captionAvoidFaces;
+    const nextAnchors = patch.captionAnchorTrack ?? captionAnchorTrack;
+    if (patch.captionStyle != null) setCaptionStyle(patch.captionStyle);
+    if (patch.captionAvoidFaces != null) setCaptionAvoidFaces(patch.captionAvoidFaces);
+    if (patch.captionAnchorTrack) setCaptionAnchorTrack(patch.captionAnchorTrack);
+    scheduleSave(
+      {
+        ...cur,
+        metadata: {
+          ...cur.metadata,
+          captionStyle: nextStyle,
+          captionAvoidFaces: nextAvoid,
+          captionAnchorTrack: nextAnchors,
         },
       },
       false,
@@ -393,7 +438,7 @@ export function EditorPage({
       message: "Preparando detector de rostos…",
     });
     try {
-      const track = await analyzeTimelineCropFocusTrack(
+      const result = await analyzeTimelineCropFocusTrack(
         cur.timeline,
         async (assetId) => {
           const cached = getCachedMediaUrl(cur.id, assetId);
@@ -418,14 +463,20 @@ export function EditorPage({
           });
         },
       );
-      setCropFocusTrack(track);
+      setCropFocusTrack(result.cropFocusTrack);
+      setCaptionAnchorTrack(result.captionAnchorTrack);
       setFramingMode("auto");
-      if (track[0]) setCropFocusX(track[0].x);
-      saveFramingMeta(track, "auto");
+      if (result.cropFocusTrack[0]) setCropFocusX(result.cropFocusTrack[0].x);
+      saveFramingMeta(
+        result.cropFocusTrack,
+        "auto",
+        result.captionAnchorTrack,
+        true,
+      );
       setStatus({
         kind: "success",
         title: "Auto-enquadramento pronto",
-        message: `${track.length} pontos de foco. O recorte acompanha os rostos na timeline.`,
+        message: `${result.cropFocusTrack.length} pontos de foco. Legendas também evitam rostos quando ativado.`,
       });
     } catch (err) {
       setStatus({
@@ -530,8 +581,14 @@ export function EditorPage({
               cropFocusX={cropFocusX}
               framingMode={framingMode}
               cropFocusTrack={cropFocusTrack}
+              captionStyle={captionStyle}
+              captionAvoidFaces={captionAvoidFaces}
+              captionAnchorTrack={captionAnchorTrack}
               autoFrameBusy={autoFrameBusy}
               onAutoFrame={() => void runAutoFrame()}
+              onCaptionSettingsChange={(opts) => {
+                saveCaptionMeta(opts);
+              }}
               onFramingChange={(opts) => {
                 setVerticalMode(opts.mode);
                 setCropFocusX(opts.cropFocusX);
@@ -679,6 +736,9 @@ export function EditorPage({
         initialCropFocusX={cropFocusX}
         framingMode={framingMode}
         cropFocusTrack={cropFocusTrack}
+        captionStyle={captionStyle}
+        captionAvoidFaces={captionAvoidFaces}
+        captionAnchorTrack={captionAnchorTrack}
         onPreviewVertical={(opts) => {
           setPreviewVertical(true);
           setVerticalMode(opts.mode);

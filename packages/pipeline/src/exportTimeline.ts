@@ -29,6 +29,9 @@ export interface ExportTimelineOptions {
   /** Timeline-relative focus curve for vertical crop */
   cropFocusTrack?: Array<{ tMs: number; x: number }>;
   burnCaptions?: boolean;
+  captionStyle?: "clean" | "bold" | "pop" | "boxed";
+  captionAvoidFaces?: boolean;
+  captionAnchorTrack?: Array<{ tMs: number; place: "top" | "bottom" }>;
   fps?: number;
   format?: ExportFormat;
   quality?: ExportQuality;
@@ -470,7 +473,12 @@ export async function exportFromTimeline(params: {
     assName: string,
   ): Promise<void> {
     const assPath = path.join(workDir, assName);
-    await writeAssFile(captions, assPath, playRes);
+    await writeAssFile(captions, assPath, {
+      playRes,
+      style: options.captionStyle ?? "pop",
+      avoidFaces: options.captionAvoidFaces !== false,
+      anchorTrack: options.captionAnchorTrack,
+    });
     const escaped = assPath
       .replace(/\\/g, "/")
       .replace(/:/g, "\\:")

@@ -3,7 +3,9 @@ import {
   clipSpeed,
   findActiveVideoClip,
   formatTimecode,
+  type CaptionAnchorKeyframe,
   type CaptionCue,
+  type CaptionStyleId,
   type CropFocusKeyframe,
   type Timeline,
   type VideoClip,
@@ -12,7 +14,40 @@ import { mediaUrl } from "../api";
 import { getSession } from "../lib/supabase";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCachedMediaUrl, setCachedMediaUrl } from "./mediaCache";
-import { interpolateCropFocus } from "./faceTrack";
+import {
+  detectCaptionPlaceFromVideo,
+  interpolateCaptionPlace,
+  interpolateCropFocus,
+} from "./faceTrack";
+
+const CAPTION_STYLES: Array<{ id: CaptionStyleId; label: string }> = [
+  { id: "pop", label: "Pop" },
+  { id: "bold", label: "Bold" },
+  { id: "boxed", label: "Caixa" },
+  { id: "clean", label: "Clean" },
+];
+
+/** Visible caption text: sliding ~3-word window synced to playhead inside the cue. */
+function syncedCaptionText(
+  text: string,
+  startMs: number,
+  endMs: number,
+  timeMs: number,
+  windowSize = 3,
+): string {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "";
+  if (words.length <= windowSize) return words.join(" ");
+  const span = Math.max(1, endMs - startMs);
+  const t = Math.min(1, Math.max(0, (timeMs - startMs) / span));
+  // Advance one word at a time through the cue.
+  const spoken = Math.min(
+    words.length,
+    Math.max(1, Math.ceil(t * words.length)),
+  );
+  const from = Math.max(0, spoken - windowSize);
+  return words.slice(from, spoken).join(" ");
+}
 
 export function Preview({
   projectId,
@@ -27,7 +62,11 @@ export function Preview({
   cropFocusX,
   framingMode = "manual",
   cropFocusTrack,
+  captionStyle = "pop",
+  captionAvoidFaces = true,
+  captionAnchorTrack,
   onFramingChange,
+  onCaptionSettingsChange,
   onAutoFrame,
   autoFrameBusy = false,
 }: {
@@ -43,10 +82,17 @@ export function Preview({
   cropFocusX?: number;
   framingMode?: "manual" | "auto";
   cropFocusTrack?: CropFocusKeyframe[];
+  captionStyle?: CaptionStyleId;
+  captionAvoidFaces?: boolean;
+  captionAnchorTrack?: CaptionAnchorKeyframe[];
   onFramingChange?: (opts: {
     mode: "crop" | "blur";
     cropFocusX: number;
     framingMode?: "manual" | "auto";
+  }) => void;
+  onCaptionSettingsChange?: (opts: {
+    captionStyle?: CaptionStyleId;
+    captionAvoidFaces?: boolean;
   }) => void;
   onAutoFrame?: () => void;
   autoFrameBusy?: boolean;
@@ -240,6 +286,48 @@ export function Preview({
             ? "center"
             : "custom";
 
+  const [liveCaptionPlace, setLiveCaptionPlace] = useState<
+    "top" | "bottom" | null
+  >(null);
+
+  const trackPlace = interpolateCaptionPlace(
+    captionAnchorTrack,
+    timeMs,
+    "bottom",
+  );
+  const captionPlace: "top" | "bottom" =
+    captionAvoidFaces
+      ? liveCaptionPlace ?? trackPlace
+      : "bottom";
+
+  const captionDisplay = cue
+    ? syncedCaptionText(cue.text, cue.startMs, cue.endMs, timeMs, 3)
+    : "";
+
+  // Live face check so preview reacts even before a full auto-enquadrar pass.
+  useEffect(() => {
+    if (!captionAvoidFaces || !cue) {
+      setLiveCaptionPlace(null);
+      return;
+    }
+    const el = videoRef.current;
+    if (!el || !el.videoWidth) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void detectCaptionPlaceFromVideo(el).then((place) => {
+        if (!cancelled && place) setLiveCaptionPlace(place);
+      });
+    }, playing ? 280 : 80);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [captionAvoidFaces, cue?.id, timeMs, playing, blobUrl]);
+
+  const hasCaptions = Boolean(
+    timeline.tracks.find((t) => t.type === "captions" && t.cues.length > 0),
+  );
+
   return (
     <div className="preview">
       <div
@@ -294,7 +382,14 @@ export function Preview({
               : "Importe um vídeo para começar"}
           </div>
         )}
-        {cue && <div className="caption-overlay">{cue.text}</div>}
+        {cue && captionDisplay && (
+          <div
+            key={`${cue.id}:${captionDisplay}`}
+            className={`caption-overlay caption-style-${captionStyle} caption-place-${captionPlace} caption-anim`}
+          >
+            {captionDisplay}
+          </div>
+        )}
       </div>
 
       <div className="preview-controls">
@@ -311,6 +406,46 @@ export function Preview({
           </span>
         )}
       </div>
+
+      {onCaptionSettingsChange && (hasCaptions || cue) && (
+        <div className="caption-bar">
+          <label className="field compact framing-field">
+            <span>Estilo da legenda</span>
+            <select
+              value={captionStyle}
+              onChange={(e) =>
+                onCaptionSettingsChange({
+                  captionStyle: e.target.value as CaptionStyleId,
+                })
+              }
+            >
+              {CAPTION_STYLES.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field compact check-row caption-avoid-row">
+            <input
+              type="checkbox"
+              checked={captionAvoidFaces}
+              onChange={(e) =>
+                onCaptionSettingsChange({
+                  captionAvoidFaces: e.target.checked,
+                })
+              }
+            />
+            <span>Evitar rostos</span>
+          </label>
+          {captionAvoidFaces && (
+            <span className="hint caption-place-hint">
+              Agora: {captionPlace === "top" ? "topo" : "base"}
+              {!captionAnchorTrack?.length ? " · ao vivo" : ""}
+            </span>
+          )}
+        </div>
+      )}
 
       {isVertical && onFramingChange && (
         <div className="framing-bar">
