@@ -241,6 +241,16 @@ export async function fetchExportJob(jobId: string): Promise<ExportJob> {
   return parseJson(await fetch(`${API}/export-jobs/${jobId}`));
 }
 
+export async function cancelExportJob(jobId: string): Promise<void> {
+  const res = await fetch(`${API}/export-jobs/${jobId}/cancel`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  if (!res.ok && res.status !== 404) {
+    await parseJson(res);
+  }
+}
+
 export async function recipeSplit(
   projectId: string,
   everySeconds: number,

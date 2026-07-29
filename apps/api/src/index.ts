@@ -13,6 +13,7 @@ import {
   exportImage,
   exportTimelineChunks,
   imageOutputName,
+  killActiveCommands,
   mustRun,
   probeDurationSeconds,
   probeImageSize,
@@ -773,6 +774,45 @@ function hasRunningExportForProject(projectId: string): boolean {
   return false;
 }
 
+function isJobCancelled(jobId: string): boolean {
+  const job = exportJobs.get(jobId);
+  return job?.status === "cancelled";
+}
+
+function assertJobNotCancelled(jobId: string): void {
+  if (isJobCancelled(jobId)) {
+    throw new Error("Cancelado pelo usuário");
+  }
+}
+
+function cancelExportJob(jobId: string): boolean {
+  const job = exportJobs.get(jobId);
+  if (!job) return false;
+  if (job.status === "done" || job.status === "error" || job.status === "cancelled") {
+    return job.status === "cancelled";
+  }
+  job.status = "cancelled";
+  job.error = "Cancelado pelo usuário";
+  job.progress = { step: "Cancelado", percent: job.progress.percent };
+  killActiveCommands();
+  return true;
+}
+
+function markJobProgress(jobId: string, step: string, percent: number): void {
+  assertJobNotCancelled(jobId);
+  const job = exportJobs.get(jobId);
+  if (job && job.status === "running") {
+    job.progress = { step, percent };
+  }
+}
+
+function finishJobError(jobId: string, err: unknown): void {
+  const job = exportJobs.get(jobId);
+  if (!job || job.status === "cancelled") return;
+  job.status = "error";
+  job.error = err instanceof Error ? err.message : String(err);
+}
+
 /** Pack export outputs into a zip (macOS/Linux `zip` CLI). */
 async function zipExportFolder(
   folder: string,
@@ -821,6 +861,7 @@ app.post<{ Params: { id: string } }>(
         exportVertical?: boolean;
         verticalMode?: "crop" | "blur";
         cropFocusX?: number;
+        cropFocusTrack?: Array<{ tMs: number; x: number }>;
         resolution?: "720p" | "1080p" | "1440p" | "2160p";
         burnCaptions?: boolean;
         fps?: number;
@@ -828,6 +869,12 @@ app.post<{ Params: { id: string } }>(
         quality?: "low" | "medium" | "high" | "max";
         audioBitrate?: "128k" | "192k" | "320k";
       };
+
+      const cropFocusTrack =
+        body.cropFocusTrack ??
+        (project.metadata?.framingMode === "auto"
+          ? project.metadata?.cropFocusTrack
+          : undefined);
 
       const jobId = nanoid(8);
       exportJobs.set(jobId, {
@@ -842,19 +889,19 @@ app.post<{ Params: { id: string } }>(
         const jobStart = exportJobs.get(jobId);
         if (jobStart) jobStart.progress = { step: "Iniciando", percent: 1 };
         try {
+          assertJobNotCancelled(jobId);
           const results = await exportFromTimeline({
             timeline: project.timeline,
             assetsDir: assetsDir(project.id),
             workDir: workPath,
             outputDir: path.join(outputDir(project.id), jobId),
-            options: body,
+            options: { ...body, cropFocusTrack },
             onProgress: (step, percent) => {
-              const job = exportJobs.get(jobId);
-              if (job) job.progress = { step, percent };
+              markJobProgress(jobId, step, percent);
             },
           });
           const job = exportJobs.get(jobId);
-          if (!job) return;
+          if (!job || job.status === "cancelled") return;
           job.status = "done";
           job.progress = { step: "Concluído", percent: 100 };
           job.outputs = results.map((r) => ({
@@ -864,10 +911,7 @@ app.post<{ Params: { id: string } }>(
           }));
           job.zipUrl = `/projects/${project.id}/exports/${jobId}/zip`;
         } catch (err) {
-          const job = exportJobs.get(jobId);
-          if (!job) return;
-          job.status = "error";
-          job.error = err instanceof Error ? err.message : String(err);
+          finishJobError(jobId, err);
         } finally {
           void rm(workPath, { recursive: true, force: true }).catch(
             () => undefined,
@@ -898,12 +942,18 @@ app.post<{ Params: { id: string } }>(
         exportVertical?: boolean;
         verticalMode?: "crop" | "blur";
         cropFocusX?: number;
+        cropFocusTrack?: Array<{ tMs: number; x: number }>;
         resolution?: "720p" | "1080p" | "1440p" | "2160p";
         fps?: number;
         format?: "mp4" | "mov";
         quality?: "low" | "medium" | "high" | "max";
         audioBitrate?: "128k" | "192k" | "320k";
       };
+      const cropFocusTrack =
+        body.cropFocusTrack ??
+        (project.metadata?.framingMode === "auto"
+          ? project.metadata?.cropFocusTrack
+          : undefined);
       const exportExistingClips = Boolean(body.exportExistingClips);
       const everySeconds = body.everySeconds ?? 60;
       if (!exportExistingClips && everySeconds < 1) {
@@ -972,6 +1022,7 @@ app.post<{ Params: { id: string } }>(
           };
         }
         try {
+          assertJobNotCancelled(jobId);
           const results = await exportTimelineChunks({
             timeline: sourceTimeline,
             assetsDir: assetsDir(project.id),
@@ -984,6 +1035,7 @@ app.post<{ Params: { id: string } }>(
               exportVertical: body.exportVertical,
               verticalMode: body.verticalMode,
               cropFocusX: body.cropFocusX,
+              cropFocusTrack,
               resolution: body.resolution,
               fps: body.fps,
               format: body.format,
@@ -992,12 +1044,11 @@ app.post<{ Params: { id: string } }>(
               burnCaptions: false,
             },
             onProgress: (step, percent) => {
-              const job = exportJobs.get(jobId);
-              if (job) job.progress = { step, percent };
+              markJobProgress(jobId, step, percent);
             },
           });
           const job = exportJobs.get(jobId);
-          if (!job) return;
+          if (!job || job.status === "cancelled") return;
           job.status = "done";
           job.progress = { step: "Concluído", percent: 100 };
           job.outputs = results.map((r) => ({
@@ -1007,10 +1058,7 @@ app.post<{ Params: { id: string } }>(
           }));
           job.zipUrl = `/projects/${project.id}/exports/${jobId}/zip`;
         } catch (err) {
-          const job = exportJobs.get(jobId);
-          if (!job) return;
-          job.status = "error";
-          job.error = err instanceof Error ? err.message : String(err);
+          finishJobError(jobId, err);
         } finally {
           void rm(workPath, { recursive: true, force: true }).catch(
             () => undefined,
@@ -1032,6 +1080,23 @@ app.get<{ Params: { jobId: string } }>(
     const job = exportJobs.get(req.params.jobId);
     if (!job) return reply.code(404).send({ error: "Job não encontrado" });
     return job;
+  },
+);
+
+app.post<{ Params: { jobId: string } }>(
+  "/export-jobs/:jobId/cancel",
+  async (req, reply) => {
+    try {
+      await requireUser(req);
+      const ok = cancelExportJob(req.params.jobId);
+      if (!ok) {
+        return reply.code(404).send({ error: "Job não encontrado" });
+      }
+      const job = exportJobs.get(req.params.jobId);
+      return { ok: true, job };
+    } catch (err) {
+      return statusError(err, reply);
+    }
   },
 );
 
@@ -1439,14 +1504,14 @@ app.post<{ Params: { id: string } }>(
         if (!job) return;
         try {
           job.progress = { step: "Preparando legendas…", percent: 2 };
+          assertJobNotCancelled(jobId);
           let timeline = structuredClone(project.timeline) as Timeline;
           timeline = await ensureWhisperCaptions(
             project,
             timeline,
             apiKey,
             (step, percent) => {
-              const j = exportJobs.get(jobId);
-              if (j) j.progress = { step, percent: percent ?? 8 };
+              markJobProgress(jobId, step, percent ?? 8);
             },
           );
           if (getCaptionCues(timeline).length === 0) {
@@ -1501,14 +1566,15 @@ app.post<{ Params: { id: string } }>(
             );
             const j = exportJobs.get(jobId);
             if (j) {
-              j.progress = {
-                step: `Gerando metadados (lote ${batchNo}/${totalBatches}) — clipe ${doneClips}/${videoClips.length}`,
-                percent: Math.round(
+              markJobProgress(
+                jobId,
+                `Gerando metadados (lote ${batchNo}/${totalBatches}) — clipe ${doneClips}/${videoClips.length}`,
+                Math.round(
                   55 +
                     (40 * Math.min(b + batch.length, withSpeech.length)) /
                       Math.max(1, withSpeech.length),
                 ),
-              };
+              );
             }
             const results = await generateClipMetaBatch(apiKey, batch);
             for (const row of results) {
@@ -1533,7 +1599,7 @@ app.post<{ Params: { id: string } }>(
           });
 
           const done = exportJobs.get(jobId);
-          if (!done) return;
+          if (!done || done.status === "cancelled") return;
           done.status = "done";
           done.progress = {
             step: `Concluído — ${ordered.length} clipe(s)`,
@@ -1547,10 +1613,7 @@ app.post<{ Params: { id: string } }>(
             },
           ];
         } catch (err) {
-          const failed = exportJobs.get(jobId);
-          if (!failed) return;
-          failed.status = "error";
-          failed.error = err instanceof Error ? err.message : String(err);
+          finishJobError(jobId, err);
         } finally {
           scheduleJobCleanup(jobId);
         }

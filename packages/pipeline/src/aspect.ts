@@ -18,6 +18,11 @@ export interface EncodeOpts {
   format?: ExportFormat;
 }
 
+export interface CropFocusKeyframe {
+  tMs: number;
+  x: number;
+}
+
 function encodeTail(outputPath: string, opts: EncodeOpts = {}): string[] {
   const { crf, preset } = qualitySettings(opts.quality ?? "high");
   const args = [
@@ -39,6 +44,85 @@ function encodeTail(outputPath: string, opts: EncodeOpts = {}): string[] {
   }
   args.push(outputPath);
   return args;
+}
+
+function clamp01(n: number): number {
+  return Math.min(1, Math.max(0, n));
+}
+
+/** Escape commas inside a filter expression embedded in a comma-joined -vf chain. */
+function escExpr(expr: string): string {
+  return expr.replace(/,/g, "\\,");
+}
+
+/**
+ * Piecewise-linear focus(t) for ffmpeg crop eval=frame.
+ * `t` is seconds from the start of the input being cropped.
+ */
+export function buildCropFocusExpr(
+  track: CropFocusKeyframe[],
+  fallback = 0.5,
+): string {
+  const pts = track
+    .map((k) => ({ t: Math.max(0, k.tMs) / 1000, x: clamp01(k.x) }))
+    .sort((a, b) => a.t - b.t);
+  if (pts.length === 0) return fallback.toFixed(4);
+  if (pts.length === 1) return pts[0]!.x.toFixed(4);
+
+  // Cap expression size for long tracks.
+  const maxPts = 60;
+  let used = pts;
+  if (pts.length > maxPts) {
+    const step = (pts.length - 1) / (maxPts - 1);
+    used = [];
+    for (let i = 0; i < maxPts; i += 1) {
+      used.push(pts[Math.round(i * step)]!);
+    }
+  }
+
+  let expr = used[used.length - 1]!.x.toFixed(4);
+  for (let i = used.length - 2; i >= 0; i -= 1) {
+    const a = used[i]!;
+    const b = used[i + 1]!;
+    const span = Math.max(0.001, b.t - a.t);
+    const lerp = `${a.x.toFixed(4)}+(${b.x.toFixed(4)}-${a.x.toFixed(4)})*(t-${a.t.toFixed(4)})/${span.toFixed(4)}`;
+    expr = `if(lt(t,${b.t.toFixed(4)}),${lerp},${expr})`;
+  }
+  const first = used[0]!;
+  if (first.t > 0.001) {
+    expr = `if(lt(t,${first.t.toFixed(4)}),${first.x.toFixed(4)},${expr})`;
+  }
+  return expr;
+}
+
+/** Shift track so t=0 is `offsetMs` on the original timeline (for per-clip exports). */
+export function offsetCropFocusTrack(
+  track: CropFocusKeyframe[] | undefined,
+  offsetMs: number,
+  durationMs?: number,
+): CropFocusKeyframe[] | undefined {
+  if (!track || track.length === 0) return undefined;
+  const end = durationMs != null ? offsetMs + durationMs : Infinity;
+  const mapped = track
+    .filter((k) => k.tMs >= offsetMs - 1 && k.tMs <= end + 1)
+    .map((k) => ({ tMs: Math.max(0, k.tMs - offsetMs), x: clamp01(k.x) }));
+  if (mapped.length === 0) {
+    // Pick nearest keyframe at the offset.
+    let nearest = track[0]!;
+    let best = Math.abs(nearest.tMs - offsetMs);
+    for (const k of track) {
+      const d = Math.abs(k.tMs - offsetMs);
+      if (d < best) {
+        best = d;
+        nearest = k;
+      }
+    }
+    return [{ tMs: 0, x: clamp01(nearest.x) }];
+  }
+  if (mapped[0]!.tMs > 0) {
+    mapped.unshift({ tMs: 0, x: mapped[0]!.x });
+  }
+  return mapped;
 }
 
 export async function exportHorizontal(
@@ -70,6 +154,7 @@ export async function exportVertical(
   onProgress?: (chunk: string) => void,
   encode: EncodeOpts = {},
   cropFocusX = 0.5,
+  cropFocusTrack?: CropFocusKeyframe[],
 ): Promise<void> {
   const { width, height } = targetSize(resolution, "vertical");
   const focus = Math.min(1, Math.max(0, cropFocusX));
@@ -101,9 +186,16 @@ export async function exportVertical(
     return;
   }
 
+  const useTrack = cropFocusTrack && cropFocusTrack.length > 0;
+  const xExpr = useTrack
+    ? `(iw-${width})*(${escExpr(buildCropFocusExpr(cropFocusTrack, focus))})`
+    : `(iw-${width})*${focus.toFixed(4)}`;
+
   const filter = [
     `scale=${width}:${height}:force_original_aspect_ratio=increase`,
-    `crop=${width}:${height}:(iw-${width})*${focus.toFixed(4)}:(ih-${height})/2`,
+    useTrack
+      ? `crop=${width}:${height}:${xExpr}:(ih-${height})/2:eval=frame`
+      : `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
     "setsar=1",
   ].join(",");
 

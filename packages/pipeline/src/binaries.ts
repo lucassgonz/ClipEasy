@@ -1,8 +1,10 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { BinaryStatus, HealthReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+
+const activeChildren = new Set<ChildProcess>();
 
 async function which(cmd: string): Promise<string | null> {
   try {
@@ -56,8 +58,12 @@ export function runCommand(
   const STDERR_CAP = 64_000;
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    activeChildren.add(child);
     let stdout = "";
     let stderr = "";
+    const cleanup = () => {
+      activeChildren.delete(child);
+    };
     child.stdout.on("data", (buf: Buffer) => {
       stdout += buf.toString();
       if (stdout.length > STDERR_CAP) stdout = stdout.slice(-STDERR_CAP);
@@ -68,11 +74,27 @@ export function runCommand(
       if (stderr.length > STDERR_CAP) stderr = stderr.slice(-STDERR_CAP);
       onStderr?.(text);
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      cleanup();
+      reject(err);
+    });
     child.on("close", (code) => {
+      cleanup();
       resolve({ code: code ?? 1, stdout, stderr });
     });
   });
+}
+
+/** Kill ffmpeg/ffprobe/etc. spawned by the pipeline (used when a job is cancelled). */
+export function killActiveCommands(): void {
+  for (const child of [...activeChildren]) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+    activeChildren.delete(child);
+  }
 }
 
 export async function mustRun(

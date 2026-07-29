@@ -423,6 +423,78 @@ textarea {
   border-top: 1px solid var(--line);
 }
 
+.volume-control {
+  margin: 0.75rem 0 0.5rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.volume-control.is-muted {
+  opacity: 0.78;
+}
+
+.volume-control-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.volume-control-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.volume-control-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.volume-control-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.volume-mute-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.volume-mute-btn:hover {
+  border-color: color-mix(in srgb, var(--ink) 25%, var(--line));
+}
+
+.volume-mute-btn[aria-pressed="true"] {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: #b91c1c;
+}
+
+.volume-slider {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent, #2563eb);
+}
+
 .inspector-actions {
   display: flex;
   gap: 0.45rem;
@@ -799,6 +871,16 @@ textarea {
   margin: 0;
 }
 
+.framing-auto-btn {
+  align-self: end;
+  white-space: nowrap;
+}
+
+.framing-auto-btn.active {
+  border-color: var(--accent, #2563eb);
+  color: var(--accent, #2563eb);
+}
+
 .preview-empty {
   color: rgba(255, 255, 255, 0.65);
   z-index: 2;
@@ -817,7 +899,18 @@ textarea {
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.85);
   font-weight: 700;
   font-size: clamp(1rem, 2.4vw, 1.4rem);
+  line-height: 1.25;
   pointer-events: none;
+  z-index: 3;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.preview-stage-9x16 .caption-overlay {
+  bottom: 10%;
+  max-width: 78%;
+  font-size: clamp(0.78rem, 3.2cqw, 1.05rem);
+  padding: 0 0.25rem;
 }
 
 .preview-controls {

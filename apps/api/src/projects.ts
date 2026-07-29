@@ -26,9 +26,16 @@ export interface ClipYoutubeMeta {
   transcriptPreview?: string;
 }
 
+export interface CropFocusKeyframe {
+  tMs: number;
+  x: number;
+}
+
 export interface ProjectMetadata {
   youtube?: YoutubeMeta;
   clipMeta?: ClipYoutubeMeta[];
+  cropFocusTrack?: CropFocusKeyframe[];
+  framingMode?: "manual" | "auto";
 }
 
 export interface ProjectRow {

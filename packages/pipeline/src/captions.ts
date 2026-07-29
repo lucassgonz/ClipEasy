@@ -18,17 +18,35 @@ function msToAssTime(ms: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
-export function cuesToAss(cues: CaptionCue[]): string {
+export interface AssPlayRes {
+  x: number;
+  y: number;
+}
+
+/** Default ASS style tuned for the given play resolution (vertical or horizontal). */
+export function cuesToAss(
+  cues: CaptionCue[],
+  playRes: AssPlayRes = { x: 1080, y: 1920 },
+): string {
+  const px = Math.max(1, Math.round(playRes.x));
+  const py = Math.max(1, Math.round(playRes.y));
+  const isVertical = py >= px;
+  // ~3.3% of height; slightly smaller on vertical so long lines wrap cleanly.
+  const fontSize = Math.round(py * (isVertical ? 0.028 : 0.045));
+  const marginLR = Math.round(px * (isVertical ? 0.07 : 0.05));
+  const marginV = Math.round(py * (isVertical ? 0.055 : 0.06));
+
   const header = `[Script Info]
 Title: clipEasy
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-WrapStyle: 0
+PlayResX: ${px}
+PlayResY: ${py}
+WrapStyle: 1
+ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,2,2,40,40,80,1
+Style: Default,Arial,${fontSize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,2,2,${marginLR},${marginLR},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -48,6 +66,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 export async function writeAssFile(
   cues: CaptionCue[],
   filePath: string,
+  playRes?: AssPlayRes,
 ): Promise<void> {
-  await writeFile(filePath, cuesToAss(cues), "utf8");
+  await writeFile(filePath, cuesToAss(cues, playRes), "utf8");
 }

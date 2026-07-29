@@ -8,6 +8,8 @@ export interface StatusPopupState {
   message: string;
   yesLabel?: string;
   noLabel?: string;
+  /** Shown on processing when onCancel is provided */
+  cancelLabel?: string;
 }
 
 export function StatusPopup({
@@ -15,11 +17,13 @@ export function StatusPopup({
   onClose,
   onYes,
   onNo,
+  onCancel,
 }: {
   status: StatusPopupState | null;
   onClose: () => void;
   onYes?: () => void;
   onNo?: () => void;
+  onCancel?: () => void;
 }) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -27,6 +31,8 @@ export function StatusPopup({
   onYesRef.current = onYes;
   const onNoRef = useRef(onNo);
   onNoRef.current = onNo;
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
 
   useEffect(() => {
     if (!status || status.kind !== "success") return;
@@ -39,7 +45,10 @@ export function StatusPopup({
     const kind = status.kind;
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      if (kind === "processing") return;
+      if (kind === "processing") {
+        if (onCancelRef.current) onCancelRef.current();
+        return;
+      }
       if (kind === "confirm") onNoRef.current?.();
       else onCloseRef.current();
     }
@@ -51,6 +60,7 @@ export function StatusPopup({
 
   const isConfirm = status.kind === "confirm";
   const canDismiss = status.kind !== "processing" && !isConfirm;
+  const canCancel = status.kind === "processing" && Boolean(onCancel);
 
   return (
     <div
@@ -83,7 +93,20 @@ export function StatusPopup({
         <h2 id="status-popup-title">{status.title}</h2>
         <p id="status-popup-msg">{status.message}</p>
         {status.kind === "processing" ? (
-          <p className="status-popup-wait">Isso pode levar alguns minutos…</p>
+          <>
+            <p className="status-popup-wait">Isso pode levar alguns minutos…</p>
+            {canCancel && (
+              <div className="status-popup-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => onCancelRef.current?.()}
+                >
+                  {status.cancelLabel ?? "Cancelar"}
+                </button>
+              </div>
+            )}
+          </>
         ) : isConfirm ? (
           <div className="status-popup-actions">
             <button

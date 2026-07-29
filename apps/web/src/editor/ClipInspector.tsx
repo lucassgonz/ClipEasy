@@ -122,25 +122,54 @@ export function ClipInspector({
         </select>
       </label>
 
-      <label className="field compact">
-        <span>Volume {clip.muted ? "(mudo)" : `${volumePct}%`}</span>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={clip.muted ? 0 : volumePct}
-          onChange={(e) =>
-            onChange({
-              volume: Number(e.target.value) / 100,
-              muted: Number(e.target.value) === 0,
-            })
-          }
-        />
-      </label>
-
-      <button type="button" className="ghost" onClick={onToggleMute} title="M">
-        {clip.muted ? "Ativar áudio" : "Mutar"}
-      </button>
+      <div className={`volume-control${clip.muted ? " is-muted" : ""}`}>
+        <div className="volume-control-head">
+          <span className="volume-control-label">Volume</span>
+          <span className="volume-control-value">
+            {clip.muted ? "Mudo" : `${volumePct}%`}
+          </span>
+        </div>
+        <div className="volume-control-row">
+          <button
+            type="button"
+            className="volume-mute-btn"
+            onClick={onToggleMute}
+            title={clip.muted ? "Ativar áudio (M)" : "Mutar (M)"}
+            aria-pressed={clip.muted}
+            aria-label={clip.muted ? "Ativar áudio" : "Mutar"}
+          >
+            {clip.muted ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+                <path
+                  fill="currentColor"
+                  d="M4.3 3.3 3 4.6l4.2 4.2H3v6h4l5 5v-6.6l5.7 5.7 1.3-1.3L4.3 3.3zM14 3.5l-2.1 2.1L14 7.7V3.5z"
+                />
+              </svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden>
+                <path
+                  fill="currentColor"
+                  d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8.3v7.4a4.5 4.5 0 0 0 2.5-3.7zM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6z"
+                />
+              </svg>
+            )}
+          </button>
+          <input
+            className="volume-slider"
+            type="range"
+            min={0}
+            max={100}
+            value={clip.muted ? 0 : volumePct}
+            onChange={(e) =>
+              onChange({
+                volume: Number(e.target.value) / 100,
+                muted: Number(e.target.value) === 0,
+              })
+            }
+            aria-label="Volume do clipe"
+          />
+        </div>
+      </div>
 
       <label className="field compact">
         <span>Transição de entrada</span>

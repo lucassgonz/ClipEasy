@@ -4,6 +4,7 @@ import {
   findActiveVideoClip,
   formatTimecode,
   type CaptionCue,
+  type CropFocusKeyframe,
   type Timeline,
   type VideoClip,
 } from "../types";
@@ -11,6 +12,7 @@ import { mediaUrl } from "../api";
 import { getSession } from "../lib/supabase";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCachedMediaUrl, setCachedMediaUrl } from "./mediaCache";
+import { interpolateCropFocus } from "./faceTrack";
 
 export function Preview({
   projectId,
@@ -23,7 +25,11 @@ export function Preview({
   verticalPreview,
   verticalMode,
   cropFocusX,
+  framingMode = "manual",
+  cropFocusTrack,
   onFramingChange,
+  onAutoFrame,
+  autoFrameBusy = false,
 }: {
   projectId: string;
   timeline: Timeline;
@@ -35,10 +41,15 @@ export function Preview({
   verticalPreview?: boolean;
   verticalMode?: "crop" | "blur";
   cropFocusX?: number;
+  framingMode?: "manual" | "auto";
+  cropFocusTrack?: CropFocusKeyframe[];
   onFramingChange?: (opts: {
     mode: "crop" | "blur";
     cropFocusX: number;
+    framingMode?: "manual" | "auto";
   }) => void;
+  onAutoFrame?: () => void;
+  autoFrameBusy?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const blurRef = useRef<HTMLVideoElement>(null);
@@ -73,7 +84,11 @@ export function Preview({
   const lastAsset = useRef<string>(clip?.assetId ?? "");
   const lastSyncedClipId = useRef<string | null>(clip?.id ?? null);
 
-  const focus = Math.min(1, Math.max(0, cropFocusX ?? 0.5));
+  const manualFocus = Math.min(1, Math.max(0, cropFocusX ?? 0.5));
+  const focus =
+    framingMode === "auto" && cropFocusTrack && cropFocusTrack.length > 0
+      ? interpolateCropFocus(cropFocusTrack, timeMs, manualFocus)
+      : manualFocus;
   const mode = verticalMode ?? "crop";
   const isVertical = Boolean(verticalPreview);
 
@@ -215,13 +230,15 @@ export function Preview({
 
   const objectPosition = `${(focus * 100).toFixed(1)}% 50%`;
   const cropPreset =
-    focus <= 0.05
-      ? "left"
-      : focus >= 0.95
-        ? "right"
-        : Math.abs(focus - 0.5) < 0.05
-          ? "center"
-          : "custom";
+    framingMode === "auto"
+      ? "auto"
+      : focus <= 0.05
+        ? "left"
+        : focus >= 0.95
+          ? "right"
+          : Math.abs(focus - 0.5) < 0.05
+            ? "center"
+            : "custom";
 
   return (
     <div className="preview">
@@ -290,6 +307,7 @@ export function Preview({
             {clipSpeed(clip)}x
             {clip.muted ? " · mudo" : ""}
             {isVertical ? " · 9:16" : ""}
+            {isVertical && framingMode === "auto" ? " · auto" : ""}
           </span>
         )}
       </div>
@@ -304,6 +322,7 @@ export function Preview({
                 onFramingChange({
                   mode: e.target.value as "crop" | "blur",
                   cropFocusX: focus,
+                  framingMode,
                 })
               }
             >
@@ -327,7 +346,11 @@ export function Preview({
                     type="button"
                     className={cropPreset === key ? "active" : ""}
                     onClick={() =>
-                      onFramingChange({ mode: "crop", cropFocusX: value })
+                      onFramingChange({
+                        mode: "crop",
+                        cropFocusX: value,
+                        framingMode: "manual",
+                      })
                     }
                   >
                     {label}
@@ -335,7 +358,10 @@ export function Preview({
                 ))}
               </div>
               <label className="field compact framing-field framing-slider">
-                <span>Foco ({Math.round(focus * 100)}%)</span>
+                <span>
+                  Foco ({Math.round(focus * 100)}%)
+                  {framingMode === "auto" ? " · auto" : ""}
+                </span>
                 <input
                   type="range"
                   min={0}
@@ -345,10 +371,24 @@ export function Preview({
                     onFramingChange({
                       mode: "crop",
                       cropFocusX: Number(e.target.value) / 100,
+                      framingMode: "manual",
                     })
                   }
                 />
               </label>
+              {onAutoFrame && (
+                <button
+                  type="button"
+                  className={`ghost framing-auto-btn${
+                    framingMode === "auto" ? " active" : ""
+                  }`}
+                  disabled={autoFrameBusy}
+                  onClick={onAutoFrame}
+                  title="Rastrear rostos e ajustar o enquadramento vertical"
+                >
+                  {autoFrameBusy ? "Rastreando…" : "Auto-enquadrar"}
+                </button>
+              )}
             </>
           )}
         </div>

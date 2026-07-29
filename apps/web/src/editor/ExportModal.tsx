@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  cancelExportJob,
   exportFileUrl,
   fetchExportJob,
   startExport,
@@ -38,6 +39,8 @@ export function ExportModal({
   onPreviewVertical,
   initialVerticalMode = "crop",
   initialCropFocusX = 0.5,
+  framingMode = "manual",
+  cropFocusTrack,
 }: {
   projectId: string;
   defaultFps: number;
@@ -46,9 +49,12 @@ export function ExportModal({
   onPreviewVertical?: (opts: {
     mode: "crop" | "blur";
     cropFocusX: number;
+    framingMode?: "manual" | "auto";
   }) => void;
   initialVerticalMode?: "crop" | "blur";
   initialCropFocusX?: number;
+  framingMode?: "manual" | "auto";
+  cropFocusTrack?: ExportOptions["cropFocusTrack"];
 }) {
   const [outputs, setOutputs] = useState<"both" | "h" | "v">("both");
   const [verticalMode, setVerticalMode] = useState<"crop" | "blur">(
@@ -76,6 +82,9 @@ export function ExportModal({
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<StatusPopupState | null>(null);
   const [job, setJob] = useState<ExportJob | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const activeJobId = useRef<string | null>(null);
+  const cancelRequested = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -121,10 +130,14 @@ export function ExportModal({
   async function runExport() {
     setBusy(true);
     setJob(null);
+    cancelRequested.current = false;
+    setCancelling(false);
+    activeJobId.current = null;
     setStatus({
       kind: "processing",
       title: "Exportando",
       message: "Preparando arquivos…",
+      cancelLabel: "Cancelar",
     });
     try {
       const options: ExportOptions = {
@@ -132,6 +145,10 @@ export function ExportModal({
         exportVertical: outputs === "both" || outputs === "v",
         verticalMode,
         cropFocusX: focusX,
+        cropFocusTrack:
+          framingMode === "auto" && cropFocusTrack && cropFocusTrack.length > 0
+            ? cropFocusTrack
+            : undefined,
         resolution,
         fps,
         format,
@@ -140,13 +157,21 @@ export function ExportModal({
         burnCaptions,
       };
       const jobId = await startExport(projectId, options);
+      activeJobId.current = jobId;
       for (;;) {
+        if (cancelRequested.current) {
+          throw new Error("Cancelado pelo usuário");
+        }
         const next = await fetchExportJob(jobId);
         setJob(next);
+        if (next.status === "cancelled") {
+          throw new Error(next.error || "Cancelado pelo usuário");
+        }
         setStatus({
           kind: "processing",
           title: "Exportando",
           message: `${next.progress.step} — ${next.progress.percent}%`,
+          cancelLabel: "Cancelar",
         });
         if (next.status === "done") {
           if (next.error) throw new Error(next.error);
@@ -163,19 +188,52 @@ export function ExportModal({
         await new Promise((r) => setTimeout(r, 1000));
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const cancelled = /cancelad/i.test(msg);
       setStatus({
-        kind: "error",
-        title: "Falha na exportação",
-        message: err instanceof Error ? err.message : String(err),
+        kind: cancelled ? "success" : "error",
+        title: cancelled ? "Exportação cancelada" : "Falha na exportação",
+        message: cancelled ? "A exportação foi interrompida." : msg,
       });
+      if (cancelled) setJob(null);
     } finally {
+      activeJobId.current = null;
+      cancelRequested.current = false;
+      setCancelling(false);
       setBusy(false);
+    }
+  }
+
+  async function handleCancelExport() {
+    if (cancelRequested.current) return;
+    cancelRequested.current = true;
+    setCancelling(true);
+    const jobId = activeJobId.current;
+    setStatus({
+      kind: "processing",
+      title: "Cancelando…",
+      message: "Interrompendo a exportação…",
+    });
+    if (jobId) {
+      try {
+        await cancelExportJob(jobId);
+      } catch {
+        // Client-side cancel still stops polling.
+      }
     }
   }
 
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
-      <StatusPopup status={status} onClose={() => setStatus(null)} />
+      <StatusPopup
+        status={status}
+        onClose={() => setStatus(null)}
+        onCancel={
+          busy && status?.kind === "processing" && !cancelling
+            ? () => void handleCancelExport()
+            : undefined
+        }
+      />
       <div
         className="modal export-modal"
         role="dialog"
@@ -219,6 +277,14 @@ export function ExportModal({
 
               {verticalMode === "crop" && (
                 <>
+                  {framingMode === "auto" &&
+                    cropFocusTrack &&
+                    cropFocusTrack.length > 0 && (
+                      <p className="hint">
+                        Auto-enquadramento ativo ({cropFocusTrack.length}{" "}
+                        pontos) — o export vertical acompanha os rostos.
+                      </p>
+                    )}
                   <label className="field compact">
                     <span>Posição do recorte</span>
                     <select

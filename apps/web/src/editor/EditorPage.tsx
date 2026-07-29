@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { getProject, saveProject } from "../api";
-import { clipDurationMs, type Project, type Timeline, type VideoClip } from "../types";
+import { getProject, mediaUrl, saveProject } from "../api";
+import { getSession } from "../lib/supabase";
+import {
+  clipDurationMs,
+  type CropFocusKeyframe,
+  type Project,
+  type Timeline,
+  type VideoClip,
+} from "../types";
 import { ClipInspector } from "./ClipInspector";
 import { EditToolbar } from "./EditToolbar";
 import { ExportModal } from "./ExportModal";
+import { analyzeTimelineCropFocusTrack } from "./faceTrack";
+import { getCachedMediaUrl, setCachedMediaUrl } from "./mediaCache";
 import { Preview } from "./Preview";
 import { SidePanel } from "./SidePanel";
 import { StatusPopup, type StatusPopupState } from "./StatusPopup";
@@ -48,6 +57,9 @@ export function EditorPage({
   const [previewVertical, setPreviewVertical] = useState(false);
   const [cropFocusX, setCropFocusX] = useState(0.5);
   const [verticalMode, setVerticalMode] = useState<"crop" | "blur">("crop");
+  const [framingMode, setFramingMode] = useState<"manual" | "auto">("manual");
+  const [cropFocusTrack, setCropFocusTrack] = useState<CropFocusKeyframe[]>([]);
+  const [autoFrameBusy, setAutoFrameBusy] = useState(false);
   const [sideTab, setSideTab] = useState<"clip" | "project">("project");
   const [showShortcuts, setShowShortcuts] = useState(false);
 
@@ -73,6 +85,13 @@ export function EditorPage({
         setProject(p);
         history.current = [];
         future.current = [];
+        const track = p.metadata?.cropFocusTrack ?? [];
+        setCropFocusTrack(track);
+        setFramingMode(
+          p.metadata?.framingMode === "auto" && track.length > 0
+            ? "auto"
+            : "manual",
+        );
       })
       .catch((e: Error) => setError(e.message));
   }, [projectId]);
@@ -91,6 +110,7 @@ export function EditorPage({
       void saveProject(next.id, {
         title: next.title,
         timeline: next.timeline,
+        metadata: next.metadata,
       }).catch((e: Error) =>
         setStatus({
           kind: "error",
@@ -99,6 +119,25 @@ export function EditorPage({
         }),
       );
     }, 600);
+  }
+
+  function saveFramingMeta(
+    track: CropFocusKeyframe[],
+    mode: "manual" | "auto",
+  ) {
+    const cur = projectRef.current;
+    if (!cur) return;
+    scheduleSave(
+      {
+        ...cur,
+        metadata: {
+          ...cur.metadata,
+          cropFocusTrack: track,
+          framingMode: mode,
+        },
+      },
+      false,
+    );
   }
 
   function applyTimeline(timeline: Timeline, pushHistory = true) {
@@ -341,6 +380,64 @@ export function EditorPage({
     );
   }
 
+  async function runAutoFrame() {
+    const cur = projectRef.current;
+    if (!cur || autoFrameBusy) return;
+    setPreviewVertical(true);
+    setVerticalMode("crop");
+    setPlaying(false);
+    setAutoFrameBusy(true);
+    setStatus({
+      kind: "processing",
+      title: "Auto-enquadramento",
+      message: "Preparando detector de rostos…",
+    });
+    try {
+      const track = await analyzeTimelineCropFocusTrack(
+        cur.timeline,
+        async (assetId) => {
+          const cached = getCachedMediaUrl(cur.id, assetId);
+          if (cached) return cached;
+          const session = await getSession();
+          const res = await fetch(mediaUrl(cur.id, assetId), {
+            headers: session?.access_token
+              ? { Authorization: `Bearer ${session.access_token}` }
+              : {},
+          });
+          if (!res.ok) throw new Error("Falha ao carregar mídia para rastreio");
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          setCachedMediaUrl(cur.id, assetId, url);
+          return url;
+        },
+        (step, percent) => {
+          setStatus({
+            kind: "processing",
+            title: "Auto-enquadramento",
+            message: `${step} — ${percent}%`,
+          });
+        },
+      );
+      setCropFocusTrack(track);
+      setFramingMode("auto");
+      if (track[0]) setCropFocusX(track[0].x);
+      saveFramingMeta(track, "auto");
+      setStatus({
+        kind: "success",
+        title: "Auto-enquadramento pronto",
+        message: `${track.length} pontos de foco. O recorte acompanha os rostos na timeline.`,
+      });
+    } catch (err) {
+      setStatus({
+        kind: "error",
+        title: "Falha no auto-enquadramento",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setAutoFrameBusy(false);
+    }
+  }
+
   if (!project) {
     return <div className="editor-page">Carregando projeto…</div>;
   }
@@ -431,9 +528,19 @@ export function EditorPage({
               verticalPreview={previewVertical}
               verticalMode={verticalMode}
               cropFocusX={cropFocusX}
+              framingMode={framingMode}
+              cropFocusTrack={cropFocusTrack}
+              autoFrameBusy={autoFrameBusy}
+              onAutoFrame={() => void runAutoFrame()}
               onFramingChange={(opts) => {
                 setVerticalMode(opts.mode);
                 setCropFocusX(opts.cropFocusX);
+                if (opts.framingMode) {
+                  setFramingMode(opts.framingMode);
+                  if (opts.framingMode === "manual") {
+                    saveFramingMeta(cropFocusTrack, "manual");
+                  }
+                }
               }}
             />
           </div>
@@ -570,10 +677,13 @@ export function EditorPage({
         onClose={() => setExportOpen(false)}
         initialVerticalMode={verticalMode}
         initialCropFocusX={cropFocusX}
+        framingMode={framingMode}
+        cropFocusTrack={cropFocusTrack}
         onPreviewVertical={(opts) => {
           setPreviewVertical(true);
           setVerticalMode(opts.mode);
           setCropFocusX(opts.cropFocusX);
+          if (opts.framingMode) setFramingMode(opts.framingMode);
         }}
       />
 

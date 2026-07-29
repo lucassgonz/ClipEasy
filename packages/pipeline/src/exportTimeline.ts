@@ -16,8 +16,8 @@ import type {
   ExportQuality,
   Resolution,
 } from "./types.js";
-import { qualitySettings } from "./types.js";
-import { exportHorizontal, exportVertical } from "./aspect.js";
+import { qualitySettings, resolutionHeight } from "./types.js";
+import { exportHorizontal, exportVertical, offsetCropFocusTrack } from "./aspect.js";
 
 export interface ExportTimelineOptions {
   resolution?: Resolution;
@@ -26,6 +26,8 @@ export interface ExportTimelineOptions {
   verticalMode?: "crop" | "blur";
   /** 0 = left, 0.5 = center, 1 = right */
   cropFocusX?: number;
+  /** Timeline-relative focus curve for vertical crop */
+  cropFocusTrack?: Array<{ tMs: number; x: number }>;
   burnCaptions?: boolean;
   fps?: number;
   format?: ExportFormat;
@@ -447,42 +449,6 @@ export async function exportFromTimeline(params: {
     fps,
   );
 
-  if (options.burnCaptions !== false) {
-    const captions = getCaptionsTrack(timeline).cues;
-    if (captions.length > 0) {
-      params.onProgress?.("Gravando legendas", 60);
-      const assPath = path.join(workDir, "captions.ass");
-      await writeAssFile(captions, assPath);
-      const burned = path.join(workDir, `composed_subs.${ext}`);
-      const escaped = assPath
-        .replace(/\\/g, "/")
-        .replace(/:/g, "\\:")
-        .replace(/'/g, "\\'");
-      const { crf, preset } = qualitySettings(quality);
-      await mustRun("ffmpeg", [
-        "-y",
-        "-i",
-        composed,
-        "-vf",
-        `ass='${escaped}'`,
-        "-c:v",
-        "libx264",
-        "-preset",
-        preset,
-        "-crf",
-        String(crf),
-        "-r",
-        String(fps),
-        "-c:a",
-        "copy",
-        "-movflags",
-        "+faststart",
-        burned,
-      ]);
-      composed = burned;
-    }
-  }
-
   const results: Array<{ name: string; label: string; path: string }> = [];
   const wantH = options.exportHorizontal !== false;
   const wantV = options.exportVertical !== false;
@@ -493,35 +459,112 @@ export async function exportFromTimeline(params: {
     audioBitrate,
     format,
   };
+  const captions =
+    options.burnCaptions !== false ? getCaptionsTrack(timeline).cues : [];
+  const shouldBurn = captions.some((c) => c.text.trim());
+
+  async function burnOnto(
+    inputPath: string,
+    outputPath: string,
+    playRes: { x: number; y: number },
+    assName: string,
+  ): Promise<void> {
+    const assPath = path.join(workDir, assName);
+    await writeAssFile(captions, assPath, playRes);
+    const escaped = assPath
+      .replace(/\\/g, "/")
+      .replace(/:/g, "\\:")
+      .replace(/'/g, "\\'");
+    const { crf, preset } = qualitySettings(quality);
+    await mustRun("ffmpeg", [
+      "-y",
+      "-i",
+      inputPath,
+      "-vf",
+      `ass='${escaped}'`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      preset,
+      "-crf",
+      String(crf),
+      "-r",
+      String(fps),
+      "-c:a",
+      "copy",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+  }
+
+  function playResFor(
+    orientation: "horizontal" | "vertical",
+  ): { x: number; y: number } {
+    const h = resolutionHeight(resolution);
+    if (orientation === "horizontal") {
+      return { x: Math.round((h * 16) / 9), y: h };
+    }
+    return { x: h, y: Math.round((h * 16) / 9) };
+  }
 
   if (!wantH && !wantV) {
     const name = `export.${ext}`;
     const dest = path.join(outputDir, name);
-    await copyFile(composed, dest);
+    if (shouldBurn) {
+      params.onProgress?.("Gravando legendas", 70);
+      await burnOnto(composed, dest, playResFor("vertical"), "captions_plain.ass");
+    } else {
+      await copyFile(composed, dest);
+    }
     results.push({ name, label: "Exportação", path: dest });
   }
 
   if (wantH) {
-    params.onProgress?.("Export horizontal", 75);
+    params.onProgress?.("Export horizontal", 70);
     const name = `export_horizontal_16x9.${ext}`;
     const dest = path.join(outputDir, name);
-    await exportHorizontal(composed, dest, resolution, undefined, encode);
+    if (shouldBurn) {
+      const reframed = path.join(workDir, `h_reframed.${ext}`);
+      await exportHorizontal(composed, reframed, resolution, undefined, encode);
+      params.onProgress?.("Legendas (horizontal)", 78);
+      await burnOnto(reframed, dest, playResFor("horizontal"), "captions_h.ass");
+    } else {
+      await exportHorizontal(composed, dest, resolution, undefined, encode);
+    }
     results.push({ name, label: "Horizontal 16:9", path: dest });
   }
 
   if (wantV) {
-    params.onProgress?.("Export vertical", 90);
+    params.onProgress?.("Export vertical", 88);
     const name = `export_vertical_9x16.${ext}`;
     const dest = path.join(outputDir, name);
-    await exportVertical(
-      composed,
-      dest,
-      resolution,
-      options.verticalMode ?? "crop",
-      undefined,
-      encode,
-      options.cropFocusX ?? 0.5,
-    );
+    if (shouldBurn) {
+      const reframed = path.join(workDir, `v_reframed.${ext}`);
+      await exportVertical(
+        composed,
+        reframed,
+        resolution,
+        options.verticalMode ?? "crop",
+        undefined,
+        encode,
+        options.cropFocusX ?? 0.5,
+        options.cropFocusTrack,
+      );
+      params.onProgress?.("Legendas (vertical)", 94);
+      await burnOnto(reframed, dest, playResFor("vertical"), "captions_v.ass");
+    } else {
+      await exportVertical(
+        composed,
+        dest,
+        resolution,
+        options.verticalMode ?? "crop",
+        undefined,
+        encode,
+        options.cropFocusX ?? 0.5,
+        options.cropFocusTrack,
+      );
+    }
     results.push({ name, label: "Vertical 9:16", path: dest });
   }
 
@@ -670,6 +713,11 @@ export async function exportTimelineChunks(params: {
     if (wantV) {
       const name = `${base}_9x16.${ext}`;
       const dest = path.join(outputDir, name);
+      const pieceTrack = offsetCropFocusTrack(
+        options.cropFocusTrack,
+        piece.timelineStartMs,
+        clipDurationMs(piece),
+      );
       await exportVertical(
         raw,
         dest,
@@ -678,6 +726,7 @@ export async function exportTimelineChunks(params: {
         undefined,
         encode,
         options.cropFocusX ?? 0.5,
+        pieceTrack,
       );
       results.push({
         name,

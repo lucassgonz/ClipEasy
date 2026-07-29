@@ -41,6 +41,8 @@ export function TimelineView({
   timelineRef.current = timeline;
   const [railWidth, setRailWidth] = useState(800);
   const [pxPerMs, setPxPerMs] = useState(PX_PER_MS_DEFAULT);
+  const pxPerMsRef = useRef(pxPerMs);
+  pxPerMsRef.current = pxPerMs;
   const fittedForDuration = useRef<number | null>(null);
   /** Local draft while dragging — avoids flooding parent history/save. */
   const draftClips = useRef<VideoClip[] | null>(null);
@@ -65,6 +67,32 @@ export function TimelineView({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Trackpad pinch / Ctrl+wheel zoom, anchored under the cursor.
+  useEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const prev = pxPerMsRef.current;
+      const timeUnderCursor = (el.scrollLeft + cursorX) / Math.max(prev, 1e-9);
+      const scale = Math.exp(-e.deltaY * 0.008);
+      const next = Math.min(
+        maxPxPerMs,
+        Math.max(fitPxPerMs, prev * scale),
+      );
+      if (Math.abs(next - prev) < 1e-12) return;
+      pxPerMsRef.current = next;
+      setPxPerMs(next);
+      // Keep the timeline time under the pointer fixed after zoom.
+      el.scrollLeft = timeUnderCursor * next - cursorX;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [fitPxPerMs, maxPxPerMs]);
 
   // Keep the yellow playhead visible while the video plays.
   useEffect(() => {
@@ -408,14 +436,6 @@ export function TimelineView({
           }}
           onPointerCancel={() => {
             scrubbing.current = false;
-          }}
-          onWheel={(e) => {
-            if (!e.ctrlKey && !e.metaKey) return;
-            e.preventDefault();
-            const factor = e.deltaY > 0 ? 0.9 : 1.1;
-            setPxPerMs((p) =>
-              Math.min(maxPxPerMs, Math.max(fitPxPerMs, p * factor)),
-            );
           }}
         >
           <div className="timeline-inner" style={{ width }}>

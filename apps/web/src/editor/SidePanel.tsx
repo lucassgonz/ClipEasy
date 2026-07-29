@@ -9,6 +9,7 @@ import {
   saveProject,
   startChunkExport,
   fetchExportJob,
+  cancelExportJob,
   exportFileUrl,
   getProject,
   startClipMetaGenerate,
@@ -64,7 +65,10 @@ export function SidePanel({
   const [copied, setCopied] = useState<string | null>(null);
   const [chunkJob, setChunkJob] = useState<ExportJob | null>(null);
   const [metaClipId, setMetaClipId] = useState<string>("");
+  const [cancelling, setCancelling] = useState(false);
   const pendingExport = useRef<ExportJob | null>(null);
+  const activeJobId = useRef<string | null>(null);
+  const cancelRequested = useRef(false);
 
   const youtube = project.metadata?.youtube;
   const clipMeta = project.metadata?.clipMeta ?? [];
@@ -89,28 +93,72 @@ export function SidePanel({
     title: string,
     fn: (update: (message: string) => void) => Promise<string | void>,
   ) {
+    cancelRequested.current = false;
+    setCancelling(false);
+    activeJobId.current = null;
     setStatus({
       kind: "processing",
       title,
       message: "Iniciando…",
+      cancelLabel: "Cancelar",
     });
     try {
       const message = await fn((msg) => {
         setStatus((prev) =>
-          prev?.kind === "processing" ? { ...prev, message: msg } : prev,
+          prev?.kind === "processing"
+            ? { ...prev, message: msg, cancelLabel: "Cancelar" }
+            : prev,
         );
       });
+      if (cancelRequested.current) {
+        setStatus({
+          kind: "success",
+          title: "Cancelado",
+          message: "Operação interrompida.",
+        });
+        return;
+      }
       setStatus({
         kind: "success",
         title: "Concluído",
         message: message || `${title} finalizado com sucesso.`,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const cancelled = /cancelad/i.test(msg);
       setStatus({
-        kind: "error",
-        title: "Algo deu errado",
-        message: err instanceof Error ? err.message : String(err),
+        kind: cancelled ? "success" : "error",
+        title: cancelled ? "Cancelado" : "Algo deu errado",
+        message: cancelled ? "Operação interrompida." : msg,
       });
+    } finally {
+      activeJobId.current = null;
+      cancelRequested.current = false;
+      setCancelling(false);
+    }
+  }
+
+  async function handleCancelJob() {
+    if (cancelRequested.current) return;
+    cancelRequested.current = true;
+    setCancelling(true);
+    const jobId = activeJobId.current;
+    setStatus((prev) =>
+      prev?.kind === "processing"
+        ? {
+            ...prev,
+            title: "Cancelando…",
+            message: "Interrompendo…",
+            cancelLabel: undefined,
+          }
+        : prev,
+    );
+    if (jobId) {
+      try {
+        await cancelExportJob(jobId);
+      } catch {
+        // polling stops via cancelRequested
+      }
     }
   }
 
@@ -118,9 +166,16 @@ export function SidePanel({
     jobId: string,
     update: (message: string) => void,
   ): Promise<ExportJob> {
+    activeJobId.current = jobId;
     for (;;) {
+      if (cancelRequested.current) {
+        throw new Error("Cancelado pelo usuário");
+      }
       const job = await fetchExportJob(jobId);
       setChunkJob(job);
+      if (job.status === "cancelled") {
+        throw new Error(job.error || "Cancelado pelo usuário");
+      }
       update(`${job.progress.step} — ${job.progress.percent}%`);
       if (job.status === "done") {
         if (job.error) throw new Error(job.error);
@@ -145,10 +200,14 @@ export function SidePanel({
     applyToTimeline?: boolean;
     title: string;
   }) {
+    cancelRequested.current = false;
+    setCancelling(false);
+    activeJobId.current = null;
     setStatus({
       kind: "processing",
       title: opts.title,
       message: "Preparando exportação…",
+      cancelLabel: "Cancelar",
     });
     pendingExport.current = null;
     try {
@@ -158,12 +217,15 @@ export function SidePanel({
         applyToTimeline: opts.applyToTimeline,
         exportExistingClips: opts.exportExistingClips,
       });
+      activeJobId.current = jobId;
       if (opts.applyToTimeline) {
         onProject(await getProject(project.id));
       }
       const job = await pollChunkJob(jobId, (msg) => {
         setStatus((prev) =>
-          prev?.kind === "processing" ? { ...prev, message: msg } : prev,
+          prev?.kind === "processing"
+            ? { ...prev, message: msg, cancelLabel: "Cancelar" }
+            : prev,
         );
       });
       pendingExport.current = job;
@@ -177,11 +239,17 @@ export function SidePanel({
       });
     } catch (err) {
       pendingExport.current = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      const cancelled = /cancelad/i.test(msg);
       setStatus({
-        kind: "error",
-        title: "Algo deu errado",
-        message: err instanceof Error ? err.message : String(err),
+        kind: cancelled ? "success" : "error",
+        title: cancelled ? "Exportação cancelada" : "Algo deu errado",
+        message: cancelled ? "A exportação foi interrompida." : msg,
       });
+    } finally {
+      activeJobId.current = null;
+      cancelRequested.current = false;
+      setCancelling(false);
     }
   }
 
@@ -206,26 +274,39 @@ export function SidePanel({
       setStatus(null);
       return;
     }
+    cancelRequested.current = false;
+    setCancelling(false);
+    activeJobId.current = null;
     setStatus({
       kind: "processing",
       title: "Sugestões + download",
       message: "Baixando vídeos…",
+      cancelLabel: "Cancelar",
     });
     try {
       await downloadAuthed(zipUrlOf(job), "clipEasy-clipes.zip");
+      if (cancelRequested.current) throw new Error("Cancelado pelo usuário");
       setStatus((prev) =>
         prev?.kind === "processing"
-          ? { ...prev, message: "Gerando sugestões com IA…" }
+          ? { ...prev, message: "Gerando sugestões com IA…", cancelLabel: "Cancelar" }
           : prev,
       );
       const metaJobId = await startClipMetaGenerate(project.id);
+      activeJobId.current = metaJobId;
       for (;;) {
+        if (cancelRequested.current) {
+          throw new Error("Cancelado pelo usuário");
+        }
         const metaJob = await fetchExportJob(metaJobId);
+        if (metaJob.status === "cancelled") {
+          throw new Error(metaJob.error || "Cancelado pelo usuário");
+        }
         setStatus((prev) =>
           prev?.kind === "processing"
             ? {
                 ...prev,
                 message: `${metaJob.progress.step} — ${metaJob.progress.percent}%`,
+                cancelLabel: "Cancelar",
               }
             : prev,
         );
@@ -245,7 +326,7 @@ export function SidePanel({
       }
       setStatus((prev) =>
         prev?.kind === "processing"
-          ? { ...prev, message: "Baixando TXT de sugestões…" }
+          ? { ...prev, message: "Baixando TXT de sugestões…", cancelLabel: "Cancelar" }
           : prev,
       );
       await downloadAuthed(
@@ -259,11 +340,17 @@ export function SidePanel({
         message: `ZIP com ${job.outputs.length} vídeo(s) e TXT com ${n} sugestão(ões) para YouTube/TikTok/Instagram.`,
       });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const cancelled = /cancelad/i.test(msg);
       setStatus({
-        kind: "error",
-        title: "Algo deu errado",
-        message: err instanceof Error ? err.message : String(err),
+        kind: cancelled ? "success" : "error",
+        title: cancelled ? "Cancelado" : "Algo deu errado",
+        message: cancelled ? "Operação interrompida." : msg,
       });
+    } finally {
+      activeJobId.current = null;
+      cancelRequested.current = false;
+      setCancelling(false);
     }
   }
 
@@ -296,6 +383,9 @@ export function SidePanel({
         onClose={() => setStatus(null)}
         onYes={() => void finishExportWithSuggestions()}
         onNo={() => void finishExportWithoutSuggestions()}
+        onCancel={
+          busy && !cancelling ? () => void handleCancelJob() : undefined
+        }
       />
 
       <h2>Importar</h2>
@@ -631,8 +721,15 @@ export function SidePanel({
           void run("Sugestões por clipe", async (update) => {
             update("Gerando sugestões com IA…");
             const jobId = await startClipMetaGenerate(project.id);
+            activeJobId.current = jobId;
             for (;;) {
+              if (cancelRequested.current) {
+                throw new Error("Cancelado pelo usuário");
+              }
               const job = await fetchExportJob(jobId);
+              if (job.status === "cancelled") {
+                throw new Error(job.error || "Cancelado pelo usuário");
+              }
               update(`${job.progress.step} — ${job.progress.percent}%`);
               if (job.status === "done") {
                 if (job.error) throw new Error(job.error);

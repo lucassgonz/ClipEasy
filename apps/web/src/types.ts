@@ -101,9 +101,19 @@ export interface ClipYoutubeMeta {
   transcriptPreview?: string;
 }
 
+export interface CropFocusKeyframe {
+  /** Timeline time in ms */
+  tMs: number;
+  /** 0 = left, 0.5 = center, 1 = right (same as cropFocusX) */
+  x: number;
+}
+
 export interface ProjectMetadata {
   youtube?: YoutubeMeta;
   clipMeta?: ClipYoutubeMeta[];
+  /** Auto face-tracking crop curve for vertical 9:16 */
+  cropFocusTrack?: CropFocusKeyframe[];
+  framingMode?: "manual" | "auto";
 }
 
 export interface Project {
@@ -145,6 +155,8 @@ export interface ExportOptions {
   verticalMode?: "crop" | "blur";
   /** 0 = left, 0.5 = center, 1 = right */
   cropFocusX?: number;
+  /** Time-varying crop focus for vertical crop mode */
+  cropFocusTrack?: CropFocusKeyframe[];
   resolution?: Resolution;
   burnCaptions?: boolean;
   fps?: number;
