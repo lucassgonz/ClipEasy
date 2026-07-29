@@ -1,0 +1,15 @@
+node_modules/
+dist/
+data/
+tmp/
+uploads/
+output/
+.env
+.env.local
+.DS_Store
+*.log
+*.mp4
+*.webm
+*.mkv
+*.mov
+.turbo/

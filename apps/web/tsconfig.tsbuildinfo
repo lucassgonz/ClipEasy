@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/auth/authpage.tsx","./src/editor/editorpage.tsx","./src/editor/imagestudio.tsx","./src/editor/preview.tsx","./src/editor/sidepanel.tsx","./src/editor/timeline.tsx","./src/lib/supabase.ts","./src/projects/projectlist.tsx"],"version":"5.9.3"}

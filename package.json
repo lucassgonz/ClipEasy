@@ -1,0 +1,25 @@
+{
+  "name": "clipfacil",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Editor de vídeo por opções — local, gratuito, sem IA",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "postinstall": "npm run build --workspace=@clipfacil/pipeline",
+    "dev": "concurrently -n api,web -c green,cyan \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "npm run dev --workspace=@clipfacil/api",
+    "dev:web": "npm run dev --workspace=@clipfacil/web",
+    "build": "npm run build --workspace=@clipfacil/pipeline && npm run build --workspace=@clipfacil/api && npm run build --workspace=@clipfacil/web",
+    "build:pipeline": "npm run build --workspace=@clipfacil/pipeline",
+    "start": "npm run start --workspace=@clipfacil/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
