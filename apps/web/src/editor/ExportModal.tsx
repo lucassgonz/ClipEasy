@@ -181,28 +181,39 @@ export function ExportModal({
         if (cancelRequested.current) {
           throw new Error("Cancelado pelo usuário");
         }
-        const next = await fetchExportJob(jobId);
-        setJob(next);
-        if (next.status === "cancelled") {
-          throw new Error(next.error || "Cancelado pelo usuário");
-        }
-        setStatus({
-          kind: "processing",
-          title: "Exportando",
-          message: `${next.progress.step} — ${next.progress.percent}%`,
-          cancelLabel: "Cancelar",
-        });
-        if (next.status === "done") {
-          if (next.error) throw new Error(next.error);
+        try {
+          const next = await fetchExportJob(jobId);
+          setJob(next);
+          if (next.status === "cancelled") {
+            throw new Error(next.error || "Cancelado pelo usuário");
+          }
           setStatus({
-            kind: "success",
-            title: "Exportação concluída",
-            message: `${next.outputs.length} arquivo(s) prontos para download.`,
+            kind: "processing",
+            title: "Exportando",
+            message: `${next.progress.step} — ${next.progress.percent}%`,
+            cancelLabel: "Cancelar",
           });
-          break;
-        }
-        if (next.status === "error") {
-          throw new Error(next.error || "Falha na exportação");
+          if (next.status === "done") {
+            if (next.error) throw new Error(next.error);
+            setStatus({
+              kind: "success",
+              title: "Exportação concluída",
+              message: `${next.outputs.length} arquivo(s) prontos para download.`,
+            });
+            break;
+          }
+          if (next.status === "error") {
+            throw new Error(next.error || "Falha na exportação");
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (/interrompido|cancelad|expir|falha na export/i.test(msg)) throw err;
+          setStatus({
+            kind: "processing",
+            title: "Exportando",
+            message: "Reconectando ao servidor…",
+            cancelLabel: "Cancelar",
+          });
         }
         await new Promise((r) => setTimeout(r, 1000));
       }

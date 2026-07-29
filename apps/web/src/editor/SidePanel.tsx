@@ -179,20 +179,27 @@ export function SidePanel({
       if (cancelRequested.current) {
         throw new Error("Cancelado pelo usuário");
       }
-      const job = await fetchExportJob(jobId);
-      setChunkJob(job);
-      if (job.status === "cancelled") {
-        throw new Error(job.error || "Cancelado pelo usuário");
+      try {
+        const job = await fetchExportJob(jobId);
+        setChunkJob(job);
+        if (job.status === "cancelled") {
+          throw new Error(job.error || "Cancelado pelo usuário");
+        }
+        update(`${job.progress.step} — ${job.progress.percent}%`);
+        if (job.status === "done") {
+          if (job.error) throw new Error(job.error);
+          return job;
+        }
+        if (job.status === "error") {
+          throw new Error(job.error || "Falha ao exportar clipes");
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/interrompido|cancelad|expir/i.test(msg)) throw err;
+        if (/falha ao exportar/i.test(msg)) throw err;
+        update("Reconectando ao servidor…");
       }
-      update(`${job.progress.step} — ${job.progress.percent}%`);
-      if (job.status === "done") {
-        if (job.error) throw new Error(job.error);
-        return job;
-      }
-      if (job.status === "error") {
-        throw new Error(job.error || "Falha ao exportar clipes");
-      }
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, 1500));
     }
   }
 

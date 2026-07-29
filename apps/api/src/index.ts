@@ -903,7 +903,11 @@ function markJobProgress(jobId: string, step: string, percent: number): void {
   assertJobNotCancelled(jobId);
   const job = exportJobs.get(jobId);
   if (job && job.status === "running") {
-    job.progress = { step, percent };
+    const next =
+      percent >= 100
+        ? 100
+        : Math.max(job.progress.percent, Math.min(99, Math.round(percent)));
+    job.progress = { step, percent: next };
   }
 }
 

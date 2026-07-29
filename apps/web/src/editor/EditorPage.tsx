@@ -14,7 +14,7 @@ import { ClipInspector } from "./ClipInspector";
 import { EditToolbar } from "./EditToolbar";
 import { ExportModal } from "./ExportModal";
 import { analyzeTimelineCropFocusTrack } from "./faceTrack";
-import { getCachedMediaUrl, setCachedMediaUrl } from "./mediaCache";
+import { getCachedMediaUrl, releaseCachedMedia, setCachedMediaUrl } from "./mediaCache";
 import { Preview } from "./Preview";
 import { SidePanel } from "./SidePanel";
 import { StatusPopup, type StatusPopupState } from "./StatusPopup";
@@ -86,7 +86,8 @@ export function EditorPage({
   useEffect(() => {
     if (!pipelineBusy) return;
     setPlaying(false);
-  }, [pipelineBusy]);
+    if (project?.id) releaseCachedMedia(project.id);
+  }, [pipelineBusy, project?.id]);
 
   function bumpHistory() {
     setHistTick((n) => n + 1);

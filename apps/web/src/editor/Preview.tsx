@@ -159,6 +159,11 @@ export function Preview({
       setBlobUrl(null);
       return;
     }
+    // While exporting, keep decoder unloaded to avoid Safari memory kills.
+    if (exportBusy) {
+      setBlobUrl(null);
+      return;
+    }
     const cached = getCachedMediaUrl(projectId, clip.assetId);
     if (cached) {
       lastAsset.current = clip.assetId;
@@ -185,7 +190,18 @@ export function Preview({
     return () => {
       cancelled = true;
     };
-  }, [clip?.assetId, projectId]);
+  }, [clip?.assetId, projectId, exportBusy]);
+
+  useEffect(() => {
+    if (!exportBusy) return;
+    const vids = [videoRef.current, blurRef.current];
+    for (const el of vids) {
+      if (!el) continue;
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+    }
+  }, [exportBusy]);
 
   function disableEmbeddedTextTracks(el: HTMLVideoElement | null) {
     if (!el) return;
@@ -210,7 +226,7 @@ export function Preview({
   // Keep file soft-subs off (Safari often re-enables them on load / seek).
   useEffect(() => {
     const el = videoRef.current;
-    if (!el) return;
+    if (!el || !blobUrl || exportBusy) return;
     const kill = () => disableEmbeddedTextTracks(el);
     kill();
     el.addEventListener("loadedmetadata", kill);
@@ -218,7 +234,7 @@ export function Preview({
     el.addEventListener("play", kill);
     el.textTracks.addEventListener("addtrack", kill);
     el.textTracks.addEventListener("change", kill);
-    const poll = window.setInterval(kill, 1000);
+    const poll = window.setInterval(kill, 2000);
     return () => {
       el.removeEventListener("loadedmetadata", kill);
       el.removeEventListener("loadeddata", kill);
@@ -227,7 +243,7 @@ export function Preview({
       el.textTracks.removeEventListener("change", kill);
       window.clearInterval(poll);
     };
-  }, [blobUrl]);
+  }, [blobUrl, exportBusy]);
 
   useEffect(() => {
     const el = videoRef.current;
@@ -387,12 +403,6 @@ export function Preview({
       window.clearTimeout(timer);
     };
   }, [captionAvoidFaces, cue?.id, timeMs, playing, blobUrl, exportBusy]);
-
-  useEffect(() => {
-    if (!exportBusy) return;
-    videoRef.current?.pause();
-    blurRef.current?.pause();
-  }, [exportBusy]);
 
   const hasCaptions = Boolean(
     timeline.tracks.find((t) => t.type === "captions" && t.cues.length > 0),

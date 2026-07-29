@@ -8,9 +8,11 @@ export interface EncodeOpts {
   format?: ExportFormat;
   /**
    * Prefer wall-clock speed (batch chunk exports). Same CRF, faster x264 preset.
-   * Does not change resolution, filters, or feature set.
+   * `true` ≈ 3 preset steps; or pass an explicit step count.
    */
-  speedBias?: boolean;
+  speedBias?: boolean | number;
+  /** When true, do not force `-r` (avoids fps resample cost). */
+  keepSourceFps?: boolean;
 }
 
 const PRESET_RANK = [
@@ -38,8 +40,9 @@ export function encodeProfile(opts: EncodeOpts = {}): {
 } {
   const { crf, preset } = qualitySettings(opts.quality ?? "high");
   if (!opts.speedBias) return { crf, preset };
-  // One notch faster keeps the same CRF (visual quality nearly identical for Shorts).
-  return { crf, preset: fasterPreset(preset, 1) };
+  // Batch Shorts: jump to ultrafast/superfast at the same CRF (big wall-clock win).
+  const steps = typeof opts.speedBias === "number" ? opts.speedBias : 3;
+  return { crf, preset: fasterPreset(preset, steps) };
 }
 
 /** Common libx264 + AAC tail (without output path). */
@@ -59,7 +62,7 @@ export function encodeVideoAudioArgs(opts: EncodeOpts = {}): string[] {
     "-movflags",
     "+faststart",
   ];
-  if (opts.fps && opts.fps > 0) {
+  if (opts.fps && opts.fps > 0 && !opts.keepSourceFps) {
     args.push("-r", String(opts.fps));
   }
   return args;

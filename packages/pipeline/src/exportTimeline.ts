@@ -29,6 +29,7 @@ import {
   exportHorizontalWithAss,
   exportVertical,
   horizontalTargetSize,
+  medianCropFocus,
   offsetCropFocusTrack,
   verticalTargetSize,
   type CropFocusKeyframe,
@@ -53,7 +54,7 @@ export interface ExportTimelineOptions {
   audioBitrate?: "128k" | "192k" | "320k";
 }
 
-const CHUNK_CONCURRENCY = 2;
+const CHUNK_CONCURRENCY = 1;
 
 function assetPath(assetsDir: string, assetId: string, filename: string): string {
   return path.join(assetsDir, assetId, filename);
@@ -424,7 +425,8 @@ async function renderAspectClipOnePass(opts: {
   verticalMode: "crop" | "blur";
   cropFocusX: number;
   cropFocusTrack?: CropFocusKeyframe[];
-  speedBias?: boolean;
+  speedBias?: boolean | number;
+  keepSourceFps?: boolean;
   onProgress?: (ratio: number) => void;
 }): Promise<void> {
   const {
@@ -440,6 +442,7 @@ async function renderAspectClipOnePass(opts: {
     cropFocusX,
     cropFocusTrack,
     speedBias,
+    keepSourceFps,
     onProgress,
   } = opts;
 
@@ -457,6 +460,7 @@ async function renderAspectClipOnePass(opts: {
     quality,
     audioBitrate,
     speedBias,
+    keepSourceFps,
   });
 
   if (orientation === "horizontal") {
@@ -799,10 +803,25 @@ export async function exportTimelineChunks(params: {
     pieces.map(() => ({ name: "", label: "", path: null }));
   const flatResults: Array<{ name: string; label: string; path: string }> = [];
   const total = pieces.length;
-  let completed = 0;
+  const pieceRatio = new Array<number>(total).fill(0);
+  let lastPercent = 0;
 
-  const report = (step: string, percent: number) => {
-    params.onProgress?.(step, Math.max(1, Math.min(99, Math.round(percent))));
+  const flushProgress = () => {
+    const done = pieceRatio.filter((r) => r >= 1).length;
+    const sum = pieceRatio.reduce((a, b) => a + b, 0);
+    const percent = Math.max(
+      lastPercent,
+      Math.min(99, Math.round((sum / total) * 95)),
+    );
+    lastPercent = percent;
+    const activeIdx = pieceRatio.findIndex((r) => r > 0 && r < 1);
+    const step =
+      done >= total
+        ? `Concluindo…`
+        : activeIdx >= 0
+          ? `${done}/${total} prontos · codificando ${activeIdx + 1}/${total}`
+          : `${done}/${total} prontos`;
+    params.onProgress?.(step, Math.max(1, percent));
   };
 
   await mapPool(pieces, CHUNK_CONCURRENCY, async (piece, i) => {
@@ -816,13 +835,12 @@ export async function exportTimelineChunks(params: {
     const useCopy = canStreamCopyClip(piece);
     const pieceDur = clipDurationMs(piece) / 1000;
 
-    const updatePiece = (localRatio: number) => {
-      const overall =
-        ((completed + Math.min(0.95, Math.max(0, localRatio))) / total) * 95;
-      report(`Exportando pedaço ${i + 1}/${total}`, overall);
+    const setRatio = (ratio: number) => {
+      pieceRatio[i] = Math.min(1, Math.max(pieceRatio[i]!, ratio));
+      flushProgress();
     };
 
-    updatePiece(0.02);
+    setRatio(0.01);
 
     if (plain && useCopy) {
       const name = `${base}.${ext}`;
@@ -833,8 +851,7 @@ export async function exportTimelineChunks(params: {
         label: `Parte ${i + 1} (${labelTime})`,
         path: dest,
       };
-      completed += 1;
-      report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+      setRatio(1);
       return;
     }
 
@@ -843,6 +860,7 @@ export async function exportTimelineChunks(params: {
       const orientation = wantV ? "vertical" : "horizontal";
       const name = wantV ? `${base}_9x16.${ext}` : `${base}_16x9.${ext}`;
       const dest = path.join(outputDir, name);
+      // Per-chunk static focus (median) — same framing intent, much cheaper than animated crop.
       const pieceTrack = wantV
         ? offsetCropFocusTrack(
             options.cropFocusTrack,
@@ -850,6 +868,9 @@ export async function exportTimelineChunks(params: {
             clipDurationMs(piece),
           )
         : undefined;
+      const focusX = wantV
+        ? medianCropFocus(pieceTrack, options.cropFocusX ?? 0.5)
+        : options.cropFocusX ?? 0.5;
       await renderAspectClipOnePass({
         input,
         out: dest,
@@ -860,10 +881,11 @@ export async function exportTimelineChunks(params: {
         orientation,
         resolution,
         verticalMode: options.verticalMode ?? "crop",
-        cropFocusX: options.cropFocusX ?? 0.5,
-        cropFocusTrack: pieceTrack,
-        speedBias: true,
-        onProgress: updatePiece,
+        cropFocusX: focusX,
+        cropFocusTrack: undefined,
+        speedBias: 3,
+        keepSourceFps: true,
+        onProgress: setRatio,
       });
       results[i] = {
         name,
@@ -872,8 +894,7 @@ export async function exportTimelineChunks(params: {
           : `Parte ${i + 1} 16:9 (${labelTime})`,
         path: dest,
       };
-      completed += 1;
-      report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+      setRatio(1);
       return;
     }
 
@@ -894,8 +915,7 @@ export async function exportTimelineChunks(params: {
         label: `Parte ${i + 1} (${labelTime})`,
         path: dest,
       };
-      completed += 1;
-      report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+      setRatio(1);
       return;
     }
 
@@ -917,7 +937,7 @@ export async function exportTimelineChunks(params: {
         true,
       );
     }
-    updatePiece(0.35);
+    setRatio(0.35);
 
     const local: Array<{ name: string; label: string; path: string }> = [];
     if (wantH) {
@@ -928,7 +948,8 @@ export async function exportTimelineChunks(params: {
         quality,
         audioBitrate,
         format,
-        speedBias: true,
+        speedBias: 3,
+        keepSourceFps: true,
       });
       local.push({
         name,
@@ -944,21 +965,23 @@ export async function exportTimelineChunks(params: {
         piece.timelineStartMs,
         clipDurationMs(piece),
       );
+      const focusX = medianCropFocus(pieceTrack, options.cropFocusX ?? 0.5);
       await exportVertical(
         raw,
         dest,
         resolution,
         options.verticalMode ?? "crop",
-        makeFfmpegProgressHandler(pieceDur, (r) => updatePiece(0.35 + r * 0.6)),
+        makeFfmpegProgressHandler(pieceDur, (r) => setRatio(0.35 + r * 0.6)),
         {
           fps,
           quality,
           audioBitrate,
           format,
-          speedBias: true,
+          speedBias: 3,
+          keepSourceFps: true,
         },
-        options.cropFocusX ?? 0.5,
-        pieceTrack,
+        focusX,
+        undefined,
       );
       local.push({
         name,
@@ -967,13 +990,11 @@ export async function exportTimelineChunks(params: {
       });
     }
     await rm(raw, { force: true }).catch(() => undefined);
-    // Store first for slot ordering; extras appended after pool joins.
     results[i] = local[0] ?? { name: "", label: "", path: null };
     for (let k = 1; k < local.length; k += 1) {
       flatResults.push(local[k]!);
     }
-    completed += 1;
-    report(`Pedaço ${i + 1}/${total} pronto`, (completed / total) * 95);
+    setRatio(1);
   });
 
   params.onProgress?.("Concluído", 100);

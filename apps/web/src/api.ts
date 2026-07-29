@@ -22,10 +22,34 @@ async function authHeaders(): Promise<HeadersInit> {
   return headers;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isTransientNetworkError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    err.name === "TypeError" ||
+    /failed to fetch|networkerror|load failed|econnrefused|err_empty|resposta vazia|502|503|504/.test(
+      msg,
+    )
+  );
+}
+
 async function parseJson<T>(res: Response): Promise<T> {
   const text = await res.text();
   if (!text) {
-    if (!res.ok) throw new Error(`Erro HTTP ${res.status} (resposta vazia)`);
+    if (res.status === 404) {
+      throw new Error(
+        "Export interrompido (servidor reiniciou ou o job expirou). Inicie de novo.",
+      );
+    }
+    if (!res.ok) {
+      throw new Error(
+        `Servidor indisponível (HTTP ${res.status}). Se estava exportando, tente de novo em alguns segundos.`,
+      );
+    }
     throw new Error("Resposta vazia do servidor");
   }
   let data: T & { error?: string };
@@ -38,9 +62,66 @@ async function parseJson<T>(res: Response): Promise<T> {
     );
   }
   if (!res.ok) {
+    if (res.status === 404) {
+      throw new Error(
+        data.error ||
+          "Export interrompido (servidor reiniciou ou o job expirou). Inicie de novo.",
+      );
+    }
     throw new Error(data.error || `Erro HTTP ${res.status}`);
   }
   return data;
+}
+
+/** Fetch with retries for Vite proxy blips when the API restarts mid-export. */
+async function fetchJsonWithRetry<T>(
+  input: string,
+  init?: RequestInit,
+  opts?: { retries?: number; notFoundMessage?: string },
+): Promise<T> {
+  const retries = opts?.retries ?? 8;
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      const res = await fetch(input, init);
+      if (
+        (res.status === 502 || res.status === 503 || res.status === 504) ||
+        (res.status === 500 && !(await res.clone().text()).trim())
+      ) {
+        lastErr = new Error(`Servidor reiniciando (HTTP ${res.status})…`);
+        await sleep(400 + attempt * 350);
+        continue;
+      }
+      if (res.status === 404 && opts?.notFoundMessage) {
+        throw new Error(opts.notFoundMessage);
+      }
+      return await parseJson<T>(res);
+    } catch (err) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      if (
+        /interrompido|não encontrado|expir|cancelad|falha ao/i.test(lastErr.message) &&
+        !isTransientNetworkError(lastErr)
+      ) {
+        throw lastErr;
+      }
+      if (attempt < retries - 1 && isTransientNetworkError(lastErr)) {
+        await sleep(400 + attempt * 350);
+        continue;
+      }
+      // Also retry plain "Servidor indisponível" / empty 500 from parseJson
+      if (
+        attempt < retries - 1 &&
+        /indisponível|reiniciando|resposta vazia|failed to fetch/i.test(
+          lastErr.message,
+        )
+      ) {
+        await sleep(400 + attempt * 350);
+        continue;
+      }
+      throw lastErr;
+    }
+  }
+  throw lastErr ?? new Error("Falha de rede ao falar com a API");
 }
 
 export async function fetchHealth(): Promise<HealthReport> {
@@ -238,7 +319,11 @@ export async function startChunkExport(
 }
 
 export async function fetchExportJob(jobId: string): Promise<ExportJob> {
-  return parseJson(await fetch(`${API}/export-jobs/${jobId}`));
+  return fetchJsonWithRetry<ExportJob>(`${API}/export-jobs/${jobId}`, undefined, {
+    retries: 10,
+    notFoundMessage:
+      "Export interrompido (servidor reiniciou ou o job expirou). Inicie de novo.",
+  });
 }
 
 export async function cancelExportJob(jobId: string): Promise<void> {

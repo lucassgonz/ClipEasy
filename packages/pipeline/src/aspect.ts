@@ -126,10 +126,20 @@ export function offsetCropFocusTrack(
 /** Horizontal cover scale + center crop. */
 export function buildHorizontalVf(width: number, height: number): string {
   return [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+    `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
     `crop=${width}:${height}`,
     "setsar=1",
   ].join(",");
+}
+
+/** Median focus for a track window (fast static crop per chunk). */
+export function medianCropFocus(
+  track: CropFocusKeyframe[] | undefined,
+  fallback = 0.5,
+): number {
+  if (!track || track.length === 0) return clamp01(fallback);
+  const xs = track.map((k) => clamp01(k.x)).sort((a, b) => a - b);
+  return xs[Math.floor(xs.length / 2)]!;
 }
 
 /** Vertical cover scale + focus crop (static or animated). */
@@ -141,12 +151,13 @@ export function buildVerticalCropVf(
 ): string {
   const focus = Math.min(1, Math.max(0, cropFocusX));
   const simplified = simplifyCropFocusTrack(cropFocusTrack, focus);
-  const useTrack = simplified && simplified.length > 0;
+  // Animated crop only when the face actually moves; otherwise a constant is faster.
+  const useTrack = simplified && simplified.length > 1;
   const xExpr = useTrack
     ? `(iw-${width})*(${escExpr(buildCropFocusExpr(simplified!, focus))})`
-    : `(iw-${width})*${focus.toFixed(4)}`;
+    : `(iw-${width})*${(simplified?.[0]?.x ?? focus).toFixed(4)}`;
   return [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
+    `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
     `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
     "setsar=1",
   ].join(",");
