@@ -1,7 +1,7 @@
 import path from "node:path";
 import { mustRun } from "./binaries.js";
 import {
-  encodeVideoAudioArgs,
+  encodeVideoAudioArgsAsync,
   type EncodeOpts,
 } from "./encode.js";
 import type { ExportFormat, Resolution, VerticalMode } from "./types.js";
@@ -22,8 +22,12 @@ export interface CropFocusKeyframe {
   x: number;
 }
 
-function encodeTail(outputPath: string, opts: EncodeOpts = {}): string[] {
-  return [...encodeVideoAudioArgs(opts), outputPath];
+async function encodeTail(
+  outputPath: string,
+  opts: EncodeOpts = {},
+): Promise<string[]> {
+  const args = await encodeVideoAudioArgsAsync(opts);
+  return [...args, outputPath];
 }
 
 function clamp01(n: number): number {
@@ -126,7 +130,7 @@ export function offsetCropFocusTrack(
 /** Horizontal cover scale + center crop. */
 export function buildHorizontalVf(width: number, height: number): string {
   return [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
+    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
     `crop=${width}:${height}`,
     "setsar=1",
   ].join(",");
@@ -157,7 +161,7 @@ export function buildVerticalCropVf(
     ? `(iw-${width})*(${escExpr(buildCropFocusExpr(simplified!, focus))})`
     : `(iw-${width})*${(simplified?.[0]?.x ?? focus).toFixed(4)}`;
   return [
-    `scale=${width}:${height}:force_original_aspect_ratio=increase:flags=fast_bilinear`,
+    `scale=${width}:${height}:force_original_aspect_ratio=increase`,
     `crop=${width}:${height}:${xExpr}:(ih-${height})/2`,
     "setsar=1",
   ].join(",");
@@ -186,10 +190,16 @@ export async function exportHorizontal(
 ): Promise<void> {
   const { width, height } = targetSize(resolution, "horizontal");
   const filter = buildHorizontalVf(width, height);
+  const tail = await encodeTail(outputPath, {
+    ...encode,
+    resolution,
+    orientation: "horizontal",
+    copyAudio: encode.copyAudio ?? true,
+  });
 
   await mustRun(
     "ffmpeg",
-    ["-y", "-i", inputPath, "-vf", filter, ...encodeTail(outputPath, encode)],
+    ["-y", "-i", inputPath, "-vf", filter, ...tail],
     onProgress,
   );
 }
@@ -207,7 +217,12 @@ export async function exportVertical(
 ): Promise<void> {
   const { width, height } = targetSize(resolution, "vertical");
   const focus = Math.min(1, Math.max(0, cropFocusX));
-  const tail = encodeTail(outputPath, encode);
+  const tail = await encodeTail(outputPath, {
+    ...encode,
+    resolution,
+    orientation: "vertical",
+    copyAudio: encode.copyAudio ?? true,
+  });
   const assSuffix = assFilter ? `,${assFilter}` : "";
 
   if (mode === "blur") {
@@ -241,7 +256,7 @@ export async function exportVertical(
 
   await mustRun(
     "ffmpeg",
-    ["-y", "-i", inputPath, "-vf", filter, ...encodeTail(outputPath, encode)],
+    ["-y", "-i", inputPath, "-vf", filter, ...tail],
     onProgress,
   );
 }
@@ -256,9 +271,15 @@ export async function exportHorizontalWithAss(
 ): Promise<void> {
   const { width, height } = targetSize(resolution, "horizontal");
   const filter = `${buildHorizontalVf(width, height)},${assFilter}`;
+  const tail = await encodeTail(outputPath, {
+    ...encode,
+    resolution,
+    orientation: "horizontal",
+    copyAudio: encode.copyAudio ?? true,
+  });
   await mustRun(
     "ffmpeg",
-    ["-y", "-i", inputPath, "-vf", filter, ...encodeTail(outputPath, encode)],
+    ["-y", "-i", inputPath, "-vf", filter, ...tail],
     onProgress,
   );
 }

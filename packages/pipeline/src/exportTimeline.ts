@@ -5,6 +5,8 @@ import { mustRun } from "./binaries.js";
 import {
   encodeProfile,
   encodeVideoAudioArgs,
+  encodeVideoAudioArgsAsync,
+  isVideoToolboxAvailable,
   makeFfmpegProgressHandler,
 } from "./encode.js";
 import {
@@ -54,7 +56,8 @@ export interface ExportTimelineOptions {
   audioBitrate?: "128k" | "192k" | "320k";
 }
 
-const CHUNK_CONCURRENCY = 1;
+const CHUNK_CONCURRENCY_SOFT = 1;
+const CHUNK_CONCURRENCY_HW = 2;
 
 function assetPath(assetsDir: string, assetId: string, filename: string): string {
   return path.join(assetsDir, assetId, filename);
@@ -455,12 +458,16 @@ async function renderAspectClipOnePass(opts: {
 
   const speedF = clipVideoSpeedFilter(clip);
   const af = clipAudioFilters(clip);
-  const encode = encodeVideoAudioArgs({
+  const encode = await encodeVideoAudioArgsAsync({
     fps,
     quality,
     audioBitrate,
-    speedBias,
+    speedBias: false,
     keepSourceFps,
+    copyAudio: af.length === 0,
+    preferHardware: true,
+    resolution,
+    orientation,
   });
 
   if (orientation === "horizontal") {
@@ -805,6 +812,11 @@ export async function exportTimelineChunks(params: {
   const total = pieces.length;
   const pieceRatio = new Array<number>(total).fill(0);
   let lastPercent = 0;
+  const useHw = await isVideoToolboxAvailable();
+  const concurrency = useHw ? CHUNK_CONCURRENCY_HW : CHUNK_CONCURRENCY_SOFT;
+  if (useHw) {
+    params.onProgress?.("Aceleração de vídeo (VideoToolbox) ativa", 1);
+  }
 
   const flushProgress = () => {
     const done = pieceRatio.filter((r) => r >= 1).length;
@@ -824,7 +836,7 @@ export async function exportTimelineChunks(params: {
     params.onProgress?.(step, Math.max(1, percent));
   };
 
-  await mapPool(pieces, CHUNK_CONCURRENCY, async (piece, i) => {
+  await mapPool(pieces, concurrency, async (piece, i) => {
     const meta = timeline.assets[piece.assetId];
     if (!meta) throw new Error(`Asset ausente: ${piece.assetId}`);
     const input = assetPath(assetsDir, piece.assetId, meta.filename);
@@ -883,7 +895,6 @@ export async function exportTimelineChunks(params: {
         verticalMode: options.verticalMode ?? "crop",
         cropFocusX: focusX,
         cropFocusTrack: undefined,
-        speedBias: 3,
         keepSourceFps: true,
         onProgress: setRatio,
       });
@@ -948,8 +959,11 @@ export async function exportTimelineChunks(params: {
         quality,
         audioBitrate,
         format,
-        speedBias: 3,
         keepSourceFps: true,
+        copyAudio: true,
+        preferHardware: true,
+        resolution,
+        orientation: "horizontal",
       });
       local.push({
         name,
@@ -977,8 +991,11 @@ export async function exportTimelineChunks(params: {
           quality,
           audioBitrate,
           format,
-          speedBias: 3,
           keepSourceFps: true,
+          copyAudio: true,
+          preferHardware: true,
+          resolution,
+          orientation: "vertical",
         },
         focusX,
         undefined,
