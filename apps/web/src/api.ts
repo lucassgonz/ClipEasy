@@ -3,10 +3,12 @@ import type {
   ExportOptions,
   HealthReport,
   ImageStudioState,
+  PostingSchedule,
   Project,
   ProjectKind,
   ProjectMetadata,
   Timeline,
+  UserSettingsPublic,
   YoutubeMeta,
 } from "./types";
 import { getSession } from "./lib/supabase";
@@ -269,6 +271,30 @@ export async function suggestYoutube(
   return parseJson(res);
 }
 
+export async function saveYoutubeChannel(
+  projectId: string,
+  body: {
+    channelUrl?: string;
+    relatedVideosText?: string;
+    fetchRecent?: boolean;
+  },
+): Promise<{
+  project: Project;
+  relatedVideos: Array<{ title: string; url: string; videoId: string }>;
+  fetched: number;
+  apiKeyConfigured: boolean;
+}> {
+  const res = await fetch(`${API}/projects/${projectId}/youtube/channel`, {
+    method: "POST",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  return parseJson(res);
+}
+
 export async function startClipMetaGenerate(projectId: string): Promise<string> {
   const res = await fetch(`${API}/projects/${projectId}/clips/meta/generate`, {
     method: "POST",
@@ -371,4 +397,116 @@ export async function recipeSilence(
 
 export function exportFileUrl(urlPath: string): string {
   return `${API}${urlPath}`;
+}
+
+export async function fetchUserSettings(): Promise<UserSettingsPublic> {
+  const res = await fetch(`${API}/me/settings`, {
+    headers: await authHeaders(),
+  });
+  return parseJson(res);
+}
+
+export async function saveUserSettings(
+  postingSchedule: PostingSchedule,
+): Promise<UserSettingsPublic> {
+  const res = await fetch(`${API}/me/settings`, {
+    method: "PUT",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ postingSchedule }),
+  });
+  return parseJson(res);
+}
+
+export async function previewPublishSlots(
+  count: number,
+  postingSchedule?: PostingSchedule,
+): Promise<{
+  count: number;
+  firstAt: string | null;
+  lastAt: string | null;
+  slotsPerDay: number;
+  days: number[];
+  times: string[];
+  timezone: string;
+  sample: string[];
+}> {
+  const res = await fetch(`${API}/me/settings/preview-slots`, {
+    method: "POST",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ count, postingSchedule }),
+  });
+  return parseJson(res);
+}
+
+export async function startYoutubeOAuth(): Promise<{ url: string }> {
+  const res = await fetch(`${API}/auth/youtube/start`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return parseJson(res);
+}
+
+export async function disconnectYoutube(): Promise<UserSettingsPublic> {
+  const res = await fetch(`${API}/auth/youtube/disconnect`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return parseJson(res);
+}
+
+export async function scheduleProjectToYoutube(projectId: string): Promise<{
+  queued: number;
+  firstAt: string;
+  lastAt: string;
+  message: string;
+}> {
+  const res = await fetch(`${API}/projects/${projectId}/youtube/schedule`, {
+    method: "POST",
+    headers: await authHeaders(),
+  });
+  return parseJson(res);
+}
+
+export async function fetchPublishQueue(): Promise<{
+  total: number;
+  pending: number;
+  uploading: number;
+  done: number;
+  error: number;
+  processing: boolean;
+  items: Array<{
+    id: string;
+    filename: string;
+    title: string;
+    scheduledAt: string;
+    status: string;
+    error?: string;
+    youtubeVideoId?: string;
+  }>;
+}> {
+  const res = await fetch(`${API}/me/publish-queue`, {
+    headers: await authHeaders(),
+  });
+  return parseJson(res);
+}
+
+export async function processPublishQueue(opts?: {
+  retryErrors?: boolean;
+  limit?: number;
+}): Promise<{ uploaded: number; errors: number }> {
+  const res = await fetch(`${API}/me/publish-queue/process`, {
+    method: "POST",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(opts ?? {}),
+  });
+  return parseJson(res);
 }

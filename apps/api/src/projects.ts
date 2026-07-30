@@ -23,6 +23,8 @@ export interface ClipYoutubeMeta {
   title: string;
   description: string;
   hashtags: string[];
+  /** YouTube tags field (sem #). Falls back to hashtags when empty. */
+  tags?: string[];
   transcriptPreview?: string;
 }
 
@@ -46,6 +48,14 @@ export interface ProjectMetadata {
   captionStyle?: CaptionStyleId;
   captionAvoidFaces?: boolean;
   captionAnchorTrack?: CaptionAnchorKeyframe[];
+  /** Original download URL (YouTube/etc). Enables "assista o completo" in clip meta. */
+  sourceUrl?: string;
+  /** Creator channel URL — used to suggest another video in descriptions. */
+  channelUrl?: string;
+  /** Manual related videos (title + url). Used when API key is absent or as override. */
+  relatedVideos?: Array<{ title: string; url: string; videoId: string }>;
+  /** Raw textarea: one "Title | url" per line (parsed on generate). */
+  relatedVideosText?: string;
 }
 
 export interface ProjectRow {

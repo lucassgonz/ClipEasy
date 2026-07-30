@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createProject, listProjects, removeProject } from "../api";
 import type { Project, ProjectKind } from "../types";
 import { signOut } from "../lib/supabase";
+import { SettingsPanel } from "./SettingsPanel";
 
 export function ProjectList({
   onOpen,
@@ -14,6 +15,7 @@ export function ProjectList({
   const [title, setTitle] = useState("Novo projeto");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   async function refresh() {
     try {
@@ -47,13 +49,22 @@ export function ProjectList({
           <h1 className="brand">clipEasy</h1>
           <p className="tagline">Vídeos e fotos para YouTube — no seu PC</p>
         </div>
-        <button
-          type="button"
-          className="ghost"
-          onClick={() => void signOut().then(onLogout)}
-        >
-          Sair
-        </button>
+        <div className="projects-actions">
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setSettingsOpen(true)}
+          >
+            Configurações
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => void signOut().then(onLogout)}
+          >
+            Sair
+          </button>
+        </div>
       </header>
 
       <div className="create-row">
@@ -120,6 +131,10 @@ export function ProjectList({
           <li className="empty">Nenhum projeto ainda. Crie o primeiro.</li>
         )}
       </ul>
+
+      {settingsOpen && (
+        <SettingsPanel onClose={() => setSettingsOpen(false)} />
+      )}
     </div>
   );
 }

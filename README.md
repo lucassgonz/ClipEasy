@@ -17,8 +17,7 @@ O processamento roda **no seu computador**; a nuvem guarda só login e o JSON da
 - Editor de foto: crop com pan, brilho/contraste, export JPEG
 - Legendas (Whisper) + sugestões de metadados YouTube
 - Receitas: split e cortar silêncios
-
-Publicação automática no YouTube **não** está incluída.
+- Agenda de postagem + upload agendado no YouTube (OAuth)
 
 ## Atalhos do editor
 
@@ -70,6 +69,18 @@ Preencha:
 - `OPENAI_API_KEY`
 - `SUPABASE_URL` / keys (ou mantenha `DEV_AUTH_BYPASS=1` e `VITE_DEV_AUTH_BYPASS=1`)
 - Rode as migrations em `supabase/migrations/`
+- (Opcional) `YOUTUBE_API_KEY` — buscar vídeos recentes do canal
+- (Opcional, para agendar uploads) `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `YOUTUBE_OAUTH_REDIRECT_URI=http://127.0.0.1:8787/auth/youtube/callback`
+
+### Agendar no YouTube
+
+1. No [Google Cloud Console](https://console.cloud.google.com/), crie um OAuth client (tipo Desktop ou Web) com redirect `http://127.0.0.1:8787/auth/youtube/callback` e ative a YouTube Data API v3.
+2. Preencha as variáveis OAuth no `.env` e reinicie a API.
+3. Em **Configurações**, conecte o canal e defina dias/horários (ex.: todos os dias 12:00 e 18:00).
+4. No projeto: exporte os clipes 9:16, gere sugestões, depois **Agendar no YouTube**.
+5. 60 clipes com 2 horários/dia → ~30 dias, começando amanhã. Cada vídeo sobe como privado com `publishAt`.
+
+A fila fica em `data/publish-queue/` e só processa enquanto a API estiver rodando.
 
 ## Rodar
 
@@ -90,4 +101,4 @@ npm run dev
 
 ## Roadmap (ideias)
 
-Thumbnails, capítulos automáticos, intro/outro, presets Shorts, batch long-form→Shorts, biblioteca de mídia, backup zip, loudness −14 LUFS, publicação YouTube OAuth, efeitos/filtros.
+Thumbnails, capítulos automáticos, intro/outro, presets Shorts, batch long-form→Shorts, biblioteca de mídia, backup zip, loudness −14 LUFS, efeitos/filtros.

@@ -98,7 +98,27 @@ export interface ClipYoutubeMeta {
   title: string;
   description: string;
   hashtags: string[];
+  /** YouTube tags field (sem #). Falls back to hashtags when empty. */
+  tags?: string[];
   transcriptPreview?: string;
+}
+
+export interface PostingSchedule {
+  timezone: string;
+  /** 0=dom … 6=sáb */
+  days: number[];
+  times: string[];
+}
+
+export interface UserSettingsPublic {
+  postingSchedule: PostingSchedule;
+  youtube: {
+    connected: boolean;
+    channelId?: string;
+    channelTitle?: string;
+    connectedAt?: string;
+  };
+  oauthConfigured: boolean;
 }
 
 export interface CropFocusKeyframe {
@@ -125,6 +145,12 @@ export interface ProjectMetadata {
   captionAvoidFaces?: boolean;
   /** Where to park captions over time (top/bottom) to miss faces */
   captionAnchorTrack?: CaptionAnchorKeyframe[];
+  /** Original download URL (YouTube/etc). Enables "assista o completo" in clip meta. */
+  sourceUrl?: string;
+  /** Creator channel URL — used to suggest another video in descriptions. */
+  channelUrl?: string;
+  relatedVideos?: Array<{ title: string; url: string; videoId: string }>;
+  relatedVideosText?: string;
 }
 
 export interface Project {

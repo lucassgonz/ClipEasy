@@ -1,6 +1,10 @@
 import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { writeAssFile } from "./captions.js";
+import {
+  offsetCaptionAnchorTrack,
+  sliceCaptionsForWindow,
+  writeAssFile,
+} from "./captions.js";
 import { mustRun } from "./binaries.js";
 import {
   encodeProfile,
@@ -430,6 +434,8 @@ async function renderAspectClipOnePass(opts: {
   cropFocusTrack?: CropFocusKeyframe[];
   speedBias?: boolean | number;
   keepSourceFps?: boolean;
+  /** Optional ASS filter fragment, e.g. ass='…' */
+  assFilter?: string;
   onProgress?: (ratio: number) => void;
 }): Promise<void> {
   const {
@@ -444,8 +450,8 @@ async function renderAspectClipOnePass(opts: {
     verticalMode,
     cropFocusX,
     cropFocusTrack,
-    speedBias,
     keepSourceFps,
+    assFilter,
     onProgress,
   } = opts;
 
@@ -469,12 +475,14 @@ async function renderAspectClipOnePass(opts: {
     resolution,
     orientation,
   });
+  const assSuffix = assFilter ? `,${assFilter}` : "";
 
   if (orientation === "horizontal") {
     const { width, height } = horizontalTargetSize(resolution);
-    const parts = [speedF, buildHorizontalVf(width, height)].filter(
-      Boolean,
-    ) as string[];
+    const parts = [
+      speedF,
+      buildHorizontalVf(width, height) + assSuffix,
+    ].filter(Boolean) as string[];
     const args = ["-y", "-ss", start, "-to", end, "-i", input, "-vf", parts.join(",")];
     if (af.length) args.push("-af", af.join(","));
     args.push(...encode, out);
@@ -489,7 +497,7 @@ async function renderAspectClipOnePass(opts: {
     const filterComplex = [
       `[0:v]${pre}scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=20[bg]`,
       `[0:v]${pre}scale=${width}:${height}:force_original_aspect_ratio=decrease[fg]`,
-      `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]`,
+      `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${assFilter ? `,${assFilter}` : ""}[v]`,
     ].join(";");
     const args = [
       "-y",
@@ -514,7 +522,7 @@ async function renderAspectClipOnePass(opts: {
 
   const parts = [
     speedF,
-    buildVerticalCropVf(width, height, cropFocusX, cropFocusTrack),
+    buildVerticalCropVf(width, height, cropFocusX, cropFocusTrack) + assSuffix,
   ].filter(Boolean) as string[];
   const args = ["-y", "-ss", start, "-to", end, "-i", input, "-vf", parts.join(",")];
   if (af.length) args.push("-af", af.join(","));
@@ -818,6 +826,47 @@ export async function exportTimelineChunks(params: {
     params.onProgress?.("Aceleração de vídeo (VideoToolbox) ativa", 1);
   }
 
+  const allCaptions =
+    options.burnCaptions !== false ? getCaptionsTrack(timeline).cues : [];
+  const shouldBurn = allCaptions.some((c) => c.text.trim());
+
+  function playResFor(
+    orientation: "horizontal" | "vertical",
+  ): { x: number; y: number } {
+    const h = resolutionHeight(resolution);
+    if (orientation === "horizontal") {
+      return { x: Math.round((h * 16) / 9), y: h };
+    }
+    return { x: h, y: Math.round((h * 16) / 9) };
+  }
+
+  async function assFilterForPiece(
+    piece: VideoClip,
+    orientation: "horizontal" | "vertical",
+    assName: string,
+  ): Promise<string | undefined> {
+    if (!shouldBurn) return undefined;
+    const dur = clipDurationMs(piece);
+    const localCues = sliceCaptionsForWindow(
+      allCaptions,
+      piece.timelineStartMs,
+      piece.timelineStartMs + dur,
+    );
+    if (localCues.length === 0) return undefined;
+    const assPath = path.join(workDir, assName);
+    await writeAssFile(localCues, assPath, {
+      playRes: playResFor(orientation),
+      style: options.captionStyle ?? "pop",
+      avoidFaces: options.captionAvoidFaces !== false,
+      anchorTrack: offsetCaptionAnchorTrack(
+        options.captionAnchorTrack,
+        piece.timelineStartMs,
+        dur,
+      ),
+    });
+    return escapeAssFilterPath(assPath);
+  }
+
   const flushProgress = () => {
     const done = pieceRatio.filter((r) => r >= 1).length;
     const sum = pieceRatio.reduce((a, b) => a + b, 0);
@@ -867,12 +916,11 @@ export async function exportTimelineChunks(params: {
       return;
     }
 
-    // Fast path: single-pass seek + aspect from the source (no intermediate file).
+    // Fast path: single-pass seek + aspect (+ captions) from the source.
     if ((wantH || wantV) && !(wantH && wantV)) {
       const orientation = wantV ? "vertical" : "horizontal";
       const name = wantV ? `${base}_9x16.${ext}` : `${base}_16x9.${ext}`;
       const dest = path.join(outputDir, name);
-      // Per-chunk static focus (median) — same framing intent, much cheaper than animated crop.
       const pieceTrack = wantV
         ? offsetCropFocusTrack(
             options.cropFocusTrack,
@@ -883,6 +931,11 @@ export async function exportTimelineChunks(params: {
       const focusX = wantV
         ? medianCropFocus(pieceTrack, options.cropFocusX ?? 0.5)
         : options.cropFocusX ?? 0.5;
+      const assFilter = await assFilterForPiece(
+        piece,
+        orientation,
+        `captions_${String(i + 1).padStart(3, "0")}.ass`,
+      );
       await renderAspectClipOnePass({
         input,
         out: dest,
@@ -894,8 +947,10 @@ export async function exportTimelineChunks(params: {
         resolution,
         verticalMode: options.verticalMode ?? "crop",
         cropFocusX: focusX,
-        cropFocusTrack: undefined,
+        // Keep the per-clip focus curve so auto-enquadramento follows the face.
+        cropFocusTrack: pieceTrack,
         keepSourceFps: true,
+        assFilter,
         onProgress: setRatio,
       });
       results[i] = {
@@ -980,6 +1035,11 @@ export async function exportTimelineChunks(params: {
         clipDurationMs(piece),
       );
       const focusX = medianCropFocus(pieceTrack, options.cropFocusX ?? 0.5);
+      const assFilter = await assFilterForPiece(
+        piece,
+        "vertical",
+        `captions_v_${String(i + 1).padStart(3, "0")}.ass`,
+      );
       await exportVertical(
         raw,
         dest,
@@ -998,7 +1058,8 @@ export async function exportTimelineChunks(params: {
           orientation: "vertical",
         },
         focusX,
-        undefined,
+        pieceTrack,
+        assFilter,
       );
       local.push({
         name,

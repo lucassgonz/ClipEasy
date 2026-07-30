@@ -33,12 +33,45 @@ import Fastify from "fastify";
 import { nanoid } from "nanoid";
 import { getEnv, requireUser, supabaseConfigured } from "./auth.js";
 import {
+  fetchChannelRecentVideos,
+  normalizeHashtags,
+  parseManualRelatedVideos,
+  pickRelatedVideo,
+  type RelatedChannelVideo,
+} from "./youtube.js";
+import {
+  buildYoutubeAuthUrl,
+  disconnectYoutube,
+  exchangeYoutubeCode,
+  rememberOAuthState,
+  saveYoutubeConnection,
+  takeOAuthState,
+  webOrigin,
+  youtubeOAuthConfigured,
+} from "./youtubeOAuth.js";
+import {
+  enqueueYoutubeSchedule,
+  getPublishQueueSummary,
+  kickPublishQueue,
+  processPublishQueue,
+} from "./youtubePublish.js";
+import {
+  expandPublishSlots,
+  loadPublishQueue,
+  loadUserSettings,
+  normalizeSchedule,
+  savePublishQueue,
+  saveUserSettings,
+  type PostingSchedule,
+} from "./userSettings.js";
+import {
   createProject,
   deleteProject,
   getProject,
   listProjects,
   updateProject,
   type ClipYoutubeMeta,
+  type ProjectMetadata,
   type ProjectRow,
   type YoutubeMeta,
 } from "./projects.js";
@@ -49,6 +82,21 @@ import {
   projectDir,
   workDir,
 } from "./paths.js";
+
+function publicUserSettings(settings: Awaited<ReturnType<typeof loadUserSettings>>) {
+  return {
+    postingSchedule: settings.postingSchedule,
+    youtube: settings.youtube
+      ? {
+          connected: true,
+          channelId: settings.youtube.channelId,
+          channelTitle: settings.youtube.channelTitle,
+          connectedAt: settings.youtube.connectedAt,
+        }
+      : { connected: false },
+    oauthConfigured: youtubeOAuthConfigured(),
+  };
+}
 
 await mkdir(DATA_DIR, { recursive: true });
 
@@ -407,7 +455,12 @@ type ClipMetaDraft = {
   title: string;
   description: string;
   hashtags: string[];
+  tags: string[];
 };
+
+function tagsFromHashtags(hashtags: string[]): string[] {
+  return normalizeHashtags(hashtags, 6).map((h) => h.replace(/^#/, ""));
+}
 
 function isWeakClipMeta(row: ClipMetaDraft): boolean {
   const title = row.title.trim();
@@ -421,6 +474,10 @@ function isWeakClipMeta(row: ClipMetaDraft): boolean {
 async function generateClipMetaBatchOnce(
   apiKey: string,
   items: Array<{ index: number; filename: string; transcript: string }>,
+  opts?: {
+    sourceUrl?: string;
+    relatedVideos?: RelatedChannelVideo[];
+  },
 ): Promise<ClipMetaDraft[]> {
   const payload = items.map((it) => ({
     index: it.index,
@@ -428,24 +485,46 @@ async function generateClipMetaBatchOnce(
     transcript: it.transcript.slice(0, 2500),
   }));
 
-  const prompt = `Você é especialista em SEO e copy para YouTube, TikTok e Instagram Reels no Brasil.
-Para CADA item da lista (todos os indexes abaixo), gere metadados com base na transcrição daquele trecho.
+  const sourceUrl = opts?.sourceUrl?.trim();
+  const related = opts?.relatedVideos ?? [];
+  const linkRules = sourceUrl
+    ? `- Este projeto veio de um link. Na descrição, inclua OBRIGATORIAMENTE a linha exata:
+  Assista o vídeo completo: ${sourceUrl}
+- No título NÃO cole a URL`
+    : `- Este projeto NÃO veio de link: NÃO mencione "assista o completo", canal, nem invente URL`;
+
+  const relatedHint =
+    related.length > 0
+      ? `- Há vídeos do canal do usuário para sugerir. NÃO invente links. O sistema acrescentará "Também assista" com um vídeo real depois.`
+      : `- NÃO invente sugestões de outros vídeos do canal`;
+
+  const prompt = `Você é especialista em SEO e copy para YouTube Shorts, TikTok e Instagram Reels no Brasil.
+Para CADA item da lista, gere metadados com base APENAS na transcrição daquele trecho.
 Responda APENAS JSON válido (sem markdown):
 {
   "items": [
     {
       "index": 0,
-      "title": "título ≤ 70 caracteres, chamativo",
-      "description": "descrição mais longa (4-7 frases): contexto do trecho, tema relacionado, valor para o espectador e CTA para seguir/comentar",
-      "hashtags": ["#tag1", "#tag2"]
+      "title": "título ≤ 100 caracteres",
+      "description": "descrição (4-7 frases) + CTA",
+      "hashtags": ["#tag1", "#tag2"],
+      "tags": ["tag1", "tag2", "tag3"]
     }
   ]
 }
 Regras:
 - português do Brasil
-- descrição com 4 a 7 frases (cerca de 350–650 caracteres), expandindo o tema da fala (não só um resumo curto)
-- 5-10 hashtags por item (nicho + alcance), sempre com #
+- TÍTULOS estilo Shorts que funcionam (quase tudo em MAIÚSCULAS, gancho forte, pode 1 emoji no fim). Exemplos de tom:
+  "COMBINE a PRODUÇÃO de SOJA com o MARKETING DIGITAL e VEJA SEU CRESCIMENTO 5x MAIS RÁPIDO!"
+  "RATINHO PAGA PARA FICAR NO PRÓPRIO HOTEL SEM SER RECONHECIDO!"
+  "10 ANOS SEM ARAR A TERRA O SEGREDO DO PLANTIO DIRETO!"
+- NÃO coloque hashtags dentro do título
+- HASHTAGS: no máximo 6, estritamente ligadas ao conteúdo falado neste trecho (sem tags genéricas tipo #fyp #viral #foryou), sempre com #
+- TAGS: 6–12 termos SEM # para o campo Tags do YouTube (podem expandir as hashtags)
+- descrição com 4 a 7 frases (cerca de 350–650 caracteres), expandindo o tema da fala
 - títulos distintos entre si quando possível
+${linkRules}
+${relatedHint}
 - OBRIGATÓRIO: retorne exatamente um objeto em "items" para CADA index enviado (${items.map((i) => i.index).join(", ")})
 Itens:
 ${JSON.stringify(payload)}`;
@@ -458,13 +537,13 @@ ${JSON.stringify(payload)}`;
     },
     body: JSON.stringify({
       model: "gpt-4o-mini",
-      temperature: 0.7,
+      temperature: 0.85,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Responda somente JSON válido. Inclua todos os indexes pedidos em items.",
+            "Responda somente JSON válido. Títulos em MAIÚSCULAS estilo Shorts. Hashtags ≤6 e específicas ao trecho.",
         },
         { role: "user", content: prompt },
       ],
@@ -483,6 +562,7 @@ ${JSON.stringify(payload)}`;
       title?: string;
       description?: string;
       hashtags?: string[];
+      tags?: string[];
     }>;
   };
   const byIndex = new Map(
@@ -490,14 +570,30 @@ ${JSON.stringify(payload)}`;
   );
   return items.map((it) => {
     const row = byIndex.get(it.index);
-    const hashtags = Array.isArray(row?.hashtags)
-      ? row!.hashtags.map((h) => (h.startsWith("#") ? h : `#${h}`))
+    const hashtags = normalizeHashtags(row?.hashtags, 6);
+    const tagsRaw = Array.isArray(row?.tags)
+      ? row.tags
+          .map((t) => String(t).replace(/^#/, "").trim())
+          .filter(Boolean)
       : [];
+    const tags = [...new Set(tagsRaw.length ? tagsRaw : tagsFromHashtags(hashtags))].slice(
+      0,
+      15,
+    );
+    let description = (row?.description ?? "").trim();
+    if (sourceUrl && description && !description.includes(sourceUrl)) {
+      description = `${description}\n\nAssista o vídeo completo: ${sourceUrl}`;
+    }
+    const also = pickRelatedVideo(related, it.index, sourceUrl);
+    if (also && description && !description.includes(also.url)) {
+      description = `${description}\n\nTambém assista: ${also.title}\n${also.url}`;
+    }
     return {
       index: it.index,
-      title: (row?.title ?? "").trim(),
-      description: (row?.description ?? "").trim(),
-      hashtags: hashtags.slice(0, 12),
+      title: (row?.title ?? "").trim().replace(/#\w+/g, "").replace(/\s{2,}/g, " ").trim(),
+      description,
+      hashtags,
+      tags,
     };
   });
 }
@@ -505,6 +601,10 @@ ${JSON.stringify(payload)}`;
 async function generateClipMetaBatch(
   apiKey: string,
   items: Array<{ index: number; filename: string; transcript: string }>,
+  opts?: {
+    sourceUrl?: string;
+    relatedVideos?: RelatedChannelVideo[];
+  },
 ): Promise<ClipMetaDraft[]> {
   const done = new Map<number, ClipMetaDraft>();
   let pending = items.slice();
@@ -513,18 +613,23 @@ async function generateClipMetaBatch(
     const nextPending: typeof pending = [];
     for (let i = 0; i < pending.length; i += CLIP_META_BATCH) {
       const slice = pending.slice(i, i + CLIP_META_BATCH);
-      const results = await generateClipMetaBatchOnce(apiKey, slice);
+      const results = await generateClipMetaBatchOnce(apiKey, slice, opts);
       for (const src of slice) {
         const matched = results.find((x) => x.index === src.index) ?? {
           index: src.index,
           title: "",
           description: "",
           hashtags: [],
+          tags: [],
         };
         const row: ClipMetaDraft = {
           ...matched,
           index: src.index,
-          title: matched.title.slice(0, 100),
+          title: matched.title.slice(0, 110),
+          hashtags: normalizeHashtags(matched.hashtags, 6),
+          tags: matched.tags?.length
+            ? matched.tags
+            : tagsFromHashtags(matched.hashtags),
         };
         if (isWeakClipMeta(row)) nextPending.push(src);
         else done.set(src.index, row);
@@ -533,18 +638,23 @@ async function generateClipMetaBatch(
     pending = nextPending;
   }
 
-  // Last resort: one clip at a time for anything still missing.
   for (const src of pending) {
-    const solo = await generateClipMetaBatchOnce(apiKey, [src]);
+    const solo = await generateClipMetaBatchOnce(apiKey, [src], opts);
     const row = solo[0];
     if (row && !isWeakClipMeta(row)) {
-      done.set(src.index, { ...row, title: row.title.slice(0, 100) });
+      done.set(src.index, {
+        ...row,
+        title: row.title.slice(0, 110),
+        hashtags: normalizeHashtags(row.hashtags, 6),
+        tags: row.tags?.length ? row.tags : tagsFromHashtags(row.hashtags),
+      });
     } else {
       done.set(src.index, {
         index: src.index,
         title: `Clipe ${src.index + 1}`,
         description: src.transcript.slice(0, 280),
         hashtags: [],
+        tags: [],
       });
     }
   }
@@ -556,6 +666,7 @@ async function generateClipMetaBatch(
         title: `Clipe ${it.index + 1}`,
         description: it.transcript.slice(0, 280),
         hashtags: [],
+        tags: [],
       },
   );
 }
@@ -563,19 +674,45 @@ async function generateClipMetaBatch(
 function formatClipMetaTxt(items: ClipYoutubeMeta[]): string {
   return items
     .map((m) => {
-      const tags = m.hashtags.join(", ");
+      const hashtags = normalizeHashtags(m.hashtags, 6).join(", ");
+      const tags = (m.tags?.length
+        ? m.tags
+        : normalizeHashtags(m.hashtags, 6).map((h) => h.replace(/^#/, ""))
+      ).join(", ");
       return [
         `=== ${m.filename} ===`,
         `Título: ${m.title}`,
         "Descrição:",
         m.description || "(sem descrição)",
-        `Hashtags: ${tags || "(nenhuma)"}`,
+        `Tags: ${tags || "(nenhuma)"}`,
+        `Hashtags: ${hashtags || "(nenhuma)"}`,
         "",
       ].join("\n");
     })
     .join("\n")
     .trimEnd()
     .concat("\n");
+}
+
+async function resolveRelatedVideosForProject(project: {
+  metadata?: ProjectMetadata | null;
+}): Promise<RelatedChannelVideo[]> {
+  const meta = project.metadata ?? {};
+  const manual = meta.relatedVideos?.length
+    ? meta.relatedVideos
+    : parseManualRelatedVideos(meta.relatedVideosText ?? "");
+  if (manual.length > 0) return manual;
+
+  const channelUrl = meta.channelUrl?.trim();
+  if (!channelUrl || !getEnv("YOUTUBE_API_KEY")) return [];
+  try {
+    return await fetchChannelRecentVideos(channelUrl, {
+      max: 8,
+      excludeVideoId: undefined,
+    });
+  } catch {
+    return [];
+  }
 }
 
 app.get("/health", async () => {
@@ -768,7 +905,13 @@ app.post<{ Params: { id: string } }>(
         });
       }
       timeline.durationMs = recomputeDuration(timeline);
-      const updated = await updateProject(token, user.id, project.id, { timeline });
+      const updated = await updateProject(token, user.id, project.id, {
+        timeline,
+        metadata: {
+          ...project.metadata,
+          sourceUrl: body.url.trim(),
+        },
+      });
       return { assetId, project: updated };
     } catch (err) {
       return statusError(err, reply);
@@ -1063,6 +1206,10 @@ app.post<{ Params: { id: string } }>(
         verticalMode?: "crop" | "blur";
         cropFocusX?: number;
         cropFocusTrack?: Array<{ tMs: number; x: number }>;
+        burnCaptions?: boolean;
+        captionStyle?: "clean" | "bold" | "pop" | "boxed";
+        captionAvoidFaces?: boolean;
+        captionAnchorTrack?: Array<{ tMs: number; place: "top" | "bottom" }>;
         resolution?: "720p" | "1080p" | "1440p" | "2160p";
         fps?: number;
         format?: "mp4" | "mov";
@@ -1071,6 +1218,13 @@ app.post<{ Params: { id: string } }>(
       };
       const cropFocusTrack =
         body.cropFocusTrack ?? project.metadata?.cropFocusTrack;
+      const captionStyle =
+        body.captionStyle ?? project.metadata?.captionStyle ?? "pop";
+      const captionAvoidFaces =
+        body.captionAvoidFaces ?? project.metadata?.captionAvoidFaces ?? true;
+      const captionAnchorTrack =
+        body.captionAnchorTrack ?? project.metadata?.captionAnchorTrack;
+      const burnCaptions = body.burnCaptions !== false;
       const exportExistingClips = Boolean(body.exportExistingClips);
       const everySeconds = body.everySeconds ?? 60;
       if (!exportExistingClips && everySeconds < 1) {
@@ -1158,7 +1312,10 @@ app.post<{ Params: { id: string } }>(
               format: body.format,
               quality: body.quality ?? "medium",
               audioBitrate: body.audioBitrate,
-              burnCaptions: false,
+              burnCaptions,
+              captionStyle,
+              captionAvoidFaces,
+              captionAnchorTrack,
             },
             onProgress: (step, percent) => {
               markJobProgress(jobId, step, percent);
@@ -1658,6 +1815,7 @@ app.post<{ Params: { id: string } }>(
                 title: `Clipe ${i + 1} (sem fala)`,
                 description: "Nenhuma fala detectada neste trecho.",
                 hashtags: [],
+                tags: [],
                 transcriptPreview: "",
               };
             } else {
@@ -1674,6 +1832,8 @@ app.post<{ Params: { id: string } }>(
             1,
             Math.ceil(withSpeech.length / CLIP_META_BATCH),
           );
+          markJobProgress(jobId, "Buscando vídeos do canal…", 52);
+          const relatedVideos = await resolveRelatedVideosForProject(project);
           for (let b = 0; b < withSpeech.length; b += CLIP_META_BATCH) {
             const batch = withSpeech.slice(b, b + CLIP_META_BATCH);
             const batchNo = Math.floor(b / CLIP_META_BATCH) + 1;
@@ -1693,7 +1853,10 @@ app.post<{ Params: { id: string } }>(
                 ),
               );
             }
-            const results = await generateClipMetaBatch(apiKey, batch);
+            const results = await generateClipMetaBatch(apiKey, batch, {
+              sourceUrl: project.metadata?.sourceUrl,
+              relatedVideos,
+            });
             for (const row of results) {
               const src = batch.find((x) => x.index === row.index)!;
               clipMeta[row.index] = {
@@ -1701,7 +1864,10 @@ app.post<{ Params: { id: string } }>(
                 filename: src.filename,
                 title: row.title,
                 description: row.description,
-                hashtags: row.hashtags,
+                hashtags: normalizeHashtags(row.hashtags, 6),
+                tags: row.tags?.length
+                  ? row.tags
+                  : tagsFromHashtags(row.hashtags),
                 transcriptPreview: src.transcript.slice(0, 180),
               };
             }
@@ -1770,6 +1936,53 @@ app.get<{ Params: { id: string } }>(
 );
 
 app.post<{ Params: { id: string } }>(
+  "/projects/:id/youtube/channel",
+  async (req, reply) => {
+    try {
+      const { user, token } = await requireUser(req);
+      const project = await getProject(token, user.id, req.params.id);
+      if (!project) return reply.code(404).send({ error: "Projeto não encontrado" });
+      const body = (req.body ?? {}) as {
+        channelUrl?: string;
+        relatedVideosText?: string;
+        fetchRecent?: boolean;
+      };
+
+      const channelUrl =
+        body.channelUrl?.trim() || project.metadata?.channelUrl || "";
+      const relatedVideosText =
+        body.relatedVideosText ?? project.metadata?.relatedVideosText ?? "";
+
+      let relatedVideos = parseManualRelatedVideos(relatedVideosText);
+      let fetched = 0;
+      if (body.fetchRecent && channelUrl) {
+        relatedVideos = await fetchChannelRecentVideos(channelUrl, {
+          max: 10,
+        });
+        fetched = relatedVideos.length;
+      }
+
+      const updated = await updateProject(token, user.id, project.id, {
+        metadata: {
+          ...project.metadata,
+          channelUrl: channelUrl || undefined,
+          relatedVideosText: relatedVideosText || undefined,
+          relatedVideos: relatedVideos.length ? relatedVideos : undefined,
+        },
+      });
+      return {
+        project: updated,
+        relatedVideos,
+        fetched,
+        apiKeyConfigured: Boolean(getEnv("YOUTUBE_API_KEY")),
+      };
+    } catch (err) {
+      return statusError(err, reply);
+    }
+  },
+);
+
+app.post<{ Params: { id: string } }>(
   "/projects/:id/youtube/suggest",
   async (req, reply) => {
     try {
@@ -1795,7 +2008,14 @@ app.post<{ Params: { id: string } }>(
           .send({ error: "Gere legendas antes de sugerir metadados do YouTube" });
       }
 
-      const prompt = `Você é um especialista em SEO para YouTube no Brasil.
+      const sourceUrl = project.metadata?.sourceUrl?.trim();
+      const linkRules = sourceUrl
+        ? `- Inclua na descrição: Assista o vídeo completo: ${sourceUrl}
+- Títulos em MAIÚSCULAS estilo Shorts (ex.: "RATINHO PAGA PARA FICAR NO PRÓPRIO HOTEL SEM SER RECONHECIDO!")`
+        : `- Títulos em MAIÚSCULAS estilo Shorts
+- NÃO invente URL`;
+
+      const prompt = `Você é um especialista em SEO para YouTube Shorts no Brasil.
 Com base na transcrição abaixo, responda APENAS JSON válido (sem markdown) no formato:
 {
   "titles": ["titulo1", "titulo2", "titulo3"],
@@ -1803,7 +2023,8 @@ Com base na transcrição abaixo, responda APENAS JSON válido (sem markdown) no
   "hashtags": ["#tag1", "#tag2"],
   "tags": ["tag1", "tag2", "tag3"]
 }
-Regras: títulos ≤ 70 caracteres, hashtags 5-12, tags 8-15 (sem #), português do Brasil.
+Regras: títulos ≤ 100 caracteres, hashtags no máximo 6 e estritamente ligadas ao conteúdo (sem #fyp/#viral), tags 8-15 (sem #), português do Brasil.
+${linkRules}
 Transcrição:
 """${transcript.slice(0, 12000)}"""`;
 
@@ -1839,8 +2060,17 @@ Transcrição:
       const youtube: YoutubeMeta = {
         titles: Array.isArray(parsed.titles) ? parsed.titles.slice(0, 5) : [],
         selectedTitle: parsed.titles?.[0],
-        description: parsed.description ?? "",
-        hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags : [],
+        description: (() => {
+          let d = parsed.description ?? "";
+          if (sourceUrl && d && !d.includes(sourceUrl)) {
+            d = `${d}\n\nAssista o vídeo completo: ${sourceUrl}`;
+          }
+          return d;
+        })(),
+        hashtags: normalizeHashtags(
+          Array.isArray(parsed.hashtags) ? parsed.hashtags : [],
+          6,
+        ),
         tags: Array.isArray(parsed.tags) ? parsed.tags : [],
       };
 
@@ -1853,6 +2083,200 @@ Transcrição:
     }
   },
 );
+
+app.get("/me/settings", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    const settings = await loadUserSettings(user.id);
+    return publicUserSettings(settings);
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+app.put("/me/settings", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    const body = (req.body ?? {}) as { postingSchedule?: Partial<PostingSchedule> };
+    const current = await loadUserSettings(user.id);
+    const next = await saveUserSettings(user.id, {
+      ...current,
+      postingSchedule: normalizeSchedule(
+        body.postingSchedule ?? current.postingSchedule,
+      ),
+    });
+    return publicUserSettings(next);
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+app.post("/me/settings/preview-slots", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    const body = (req.body ?? {}) as {
+      count?: number;
+      postingSchedule?: Partial<PostingSchedule>;
+    };
+    const settings = await loadUserSettings(user.id);
+    const schedule = normalizeSchedule(
+      body.postingSchedule ?? settings.postingSchedule,
+    );
+    const count = Math.max(1, Math.min(500, Number(body.count) || 1));
+    const slots = expandPublishSlots(schedule, count);
+    return {
+      count: slots.length,
+      firstAt: slots[0]?.toISOString() ?? null,
+      lastAt: slots[slots.length - 1]?.toISOString() ?? null,
+      slotsPerDay: schedule.times.length,
+      days: schedule.days,
+      times: schedule.times,
+      timezone: schedule.timezone,
+      sample: slots.slice(0, 6).map((d) => d.toISOString()),
+    };
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+app.post("/auth/youtube/start", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    if (!youtubeOAuthConfigured()) {
+      return reply.code(503).send({
+        error:
+          "Defina GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET no .env (OAuth do Google Cloud).",
+      });
+    }
+    const state = nanoid(24);
+    rememberOAuthState(state, user.id);
+    return { url: buildYoutubeAuthUrl(state) };
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+app.get("/auth/youtube/callback", async (req, reply) => {
+  const q = req.query as { code?: string; state?: string; error?: string };
+  const origin = webOrigin();
+  if (q.error) {
+    return reply
+      .type("text/html")
+      .send(oauthResultHtml(false, q.error, origin));
+  }
+  if (!q.code || !q.state) {
+    return reply
+      .type("text/html")
+      .send(oauthResultHtml(false, "code/state ausentes", origin));
+  }
+  const userId = takeOAuthState(q.state);
+  if (!userId) {
+    return reply
+      .type("text/html")
+      .send(oauthResultHtml(false, "state inválido ou expirado", origin));
+  }
+  try {
+    const conn = await exchangeYoutubeCode(q.code);
+    await saveYoutubeConnection(userId, conn);
+    return reply.type("text/html").send(oauthResultHtml(true, null, origin));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return reply.type("text/html").send(oauthResultHtml(false, msg, origin));
+  }
+});
+
+app.post("/auth/youtube/disconnect", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    await disconnectYoutube(user.id);
+    const settings = await loadUserSettings(user.id);
+    return publicUserSettings(settings);
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+app.post<{ Params: { id: string } }>(
+  "/projects/:id/youtube/schedule",
+  async (req, reply) => {
+    try {
+      const { user, token } = await requireUser(req);
+      const project = await getProject(token, user.id, req.params.id);
+      if (!project) return reply.code(404).send({ error: "Projeto não encontrado" });
+      const clipMeta = project.metadata?.clipMeta ?? [];
+      if (!clipMeta.length) {
+        return reply
+          .code(400)
+          .send({ error: "Gere as sugestões dos clipes antes de agendar." });
+      }
+      const result = await enqueueYoutubeSchedule({
+        userId: user.id,
+        projectId: project.id,
+        clipMeta,
+      });
+      kickPublishQueue(user.id);
+      return {
+        queued: result.queued,
+        firstAt: result.firstAt,
+        lastAt: result.lastAt,
+        message: `${result.queued} clipe(s) enfileirados. Upload em segundo plano; cada um publica no horário agendado.`,
+        queue: await getPublishQueueSummary(user.id),
+      };
+    } catch (err) {
+      return statusError(err, reply);
+    }
+  },
+);
+
+app.get("/me/publish-queue", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    return await getPublishQueueSummary(user.id);
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+app.post("/me/publish-queue/process", async (req, reply) => {
+  try {
+    const { user } = await requireUser(req);
+    const body = (req.body ?? {}) as { retryErrors?: boolean; limit?: number };
+    if (body.retryErrors) {
+      const items = await loadPublishQueue(user.id);
+      await savePublishQueue(
+        user.id,
+        items.map((i) =>
+          i.status === "error" ? { ...i, status: "pending", error: undefined } : i,
+        ),
+      );
+    }
+    const result = await processPublishQueue(user.id, {
+      limit: body.limit ?? 3,
+    });
+    kickPublishQueue(user.id);
+    return { ...result, queue: await getPublishQueueSummary(user.id) };
+  } catch (err) {
+    return statusError(err, reply);
+  }
+});
+
+function oauthResultHtml(
+  ok: boolean,
+  error: string | null,
+  origin: string,
+): string {
+  const payload = JSON.stringify({ type: "youtube-oauth", ok, error });
+  return `<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>YouTube</title></head>
+<body style="font-family:system-ui;padding:2rem;background:#0f1115;color:#eee">
+  <h1>${ok ? "YouTube conectado" : "Falha na conexão"}</h1>
+  <p>${ok ? "Pode fechar esta janela e voltar ao clipEasy." : (error ?? "Erro desconhecido")}</p>
+  <script>
+    try { window.opener && window.opener.postMessage(${payload}, ${JSON.stringify(origin)}); } catch (e) {}
+    setTimeout(function () { window.close(); }, 1200);
+  </script>
+</body></html>`;
+}
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "127.0.0.1";

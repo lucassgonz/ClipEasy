@@ -13,6 +13,9 @@ import {
   exportFileUrl,
   getProject,
   startClipMetaGenerate,
+  saveYoutubeChannel,
+  scheduleProjectToYoutube,
+  previewPublishSlots,
 } from "../api";
 import { getSession } from "../lib/supabase";
 import type { ClipYoutubeMeta, ExportJob, Project, YoutubeMeta } from "../types";
@@ -231,11 +234,15 @@ export function SidePanel({
         everySeconds: opts.everySeconds ?? splitSec,
         applyToTimeline: opts.applyToTimeline,
         exportExistingClips: opts.exportExistingClips,
-        // Shorts/Reels/TikTok: always vertical 9:16 with framing track when available.
+        // Shorts/Reels/TikTok: always vertical 9:16 with framing + burned captions.
         exportVertical: true,
         exportHorizontal: false,
         verticalMode: "crop",
         cropFocusTrack: project.metadata?.cropFocusTrack,
+        burnCaptions: true,
+        captionStyle: project.metadata?.captionStyle ?? "pop",
+        captionAvoidFaces: project.metadata?.captionAvoidFaces !== false,
+        captionAnchorTrack: project.metadata?.captionAnchorTrack,
         quality: "medium",
       });
       activeJobId.current = jobId;
@@ -607,6 +614,93 @@ export function SidePanel({
         Gerar legendas (Whisper)
       </button>
 
+      <h2>Canal / sugestões</h2>
+      <p className="hint">
+        Cole a URL do seu canal para sugerir outro vídeo nas descrições. Com{" "}
+        <code>YOUTUBE_API_KEY</code> no .env buscamos vídeos recentes
+        automaticamente; senão, cole links manuais (um por linha:{" "}
+        <code>Título | https://…</code>).
+      </p>
+      <label className="field compact">
+        <span>URL do canal</span>
+        <input
+          value={project.metadata?.channelUrl ?? ""}
+          onChange={(e) => {
+            onProject({
+              ...project,
+              metadata: {
+                ...project.metadata,
+                channelUrl: e.target.value,
+              },
+            });
+          }}
+          onBlur={() => {
+            void saveProject(project.id, {
+              metadata: {
+                ...project.metadata,
+                channelUrl: project.metadata?.channelUrl,
+              },
+            });
+          }}
+          placeholder="https://youtube.com/@seucanal"
+        />
+      </label>
+      <label className="field compact">
+        <span>Vídeos para sugerir (manual)</span>
+        <textarea
+          rows={3}
+          value={project.metadata?.relatedVideosText ?? ""}
+          onChange={(e) => {
+            onProject({
+              ...project,
+              metadata: {
+                ...project.metadata,
+                relatedVideosText: e.target.value,
+              },
+            });
+          }}
+          onBlur={() => {
+            void saveProject(project.id, {
+              metadata: {
+                ...project.metadata,
+                relatedVideosText: project.metadata?.relatedVideosText,
+              },
+            });
+          }}
+          placeholder={"Meu outro vídeo | https://youtube.com/watch?v=…"}
+        />
+      </label>
+      <button
+        type="button"
+        className="ghost"
+        disabled={busy || !project.metadata?.channelUrl?.trim()}
+        onClick={() =>
+          void run("Buscar vídeos do canal", async (update) => {
+            update("Consultando YouTube…");
+            const result = await saveYoutubeChannel(project.id, {
+              channelUrl: project.metadata?.channelUrl,
+              relatedVideosText: project.metadata?.relatedVideosText,
+              fetchRecent: true,
+            });
+            onProject(result.project);
+            if (!result.apiKeyConfigured) {
+              return "Sem YOUTUBE_API_KEY — use os links manuais acima.";
+            }
+            return result.fetched
+              ? `${result.fetched} vídeo(s) recentes do canal salvos para sugestão.`
+              : "Nenhum vídeo encontrado neste canal.";
+          })
+        }
+      >
+        Buscar vídeos recentes do canal
+      </button>
+      {(project.metadata?.relatedVideos?.length ?? 0) > 0 && (
+        <p className="hint">
+          {project.metadata!.relatedVideos!.length} vídeo(s) prontos para
+          &quot;Também assista&quot; nas descrições.
+        </p>
+      )}
+
       <h2>Para o YouTube</h2>
       <button
         type="button"
@@ -676,7 +770,7 @@ export function SidePanel({
           </button>
 
           <label className="field compact">
-            <span>Hashtags</span>
+            <span>Hashtags (máx. 6, separadas por vírgula)</span>
             <input
               value={youtube.hashtags.join(", ")}
               onChange={(e) =>
@@ -685,7 +779,9 @@ export function SidePanel({
                   hashtags: e.target.value
                     .split(",")
                     .map((t) => t.trim())
-                    .filter(Boolean),
+                    .filter(Boolean)
+                    .slice(0, 6)
+                    .map((t) => (t.startsWith("#") ? t : `#${t}`)),
                 })
               }
             />
@@ -837,7 +933,7 @@ export function SidePanel({
           </button>
 
           <label className="field compact">
-            <span>Hashtags</span>
+            <span>Hashtags (máx. 6, separadas por vírgula)</span>
             <input
               value={activeMeta.hashtags.join(", ")}
               onChange={(e) =>
@@ -845,7 +941,9 @@ export function SidePanel({
                   hashtags: e.target.value
                     .split(",")
                     .map((t) => t.trim())
-                    .filter(Boolean),
+                    .filter(Boolean)
+                    .slice(0, 6)
+                    .map((t) => (t.startsWith("#") ? t : `#${t}`)),
                 })
               }
             />
@@ -860,6 +958,64 @@ export function SidePanel({
             }
           >
             Copiar hashtags
+          </button>
+
+          <label className="field compact">
+            <span>Tags YouTube (sem #, campo Tags)</span>
+            <input
+              value={(activeMeta.tags ?? []).join(", ")}
+              onChange={(e) =>
+                patchActiveMeta({
+                  tags: e.target.value
+                    .split(",")
+                    .map((t) => t.replace(/^#/, "").trim())
+                    .filter(Boolean)
+                    .slice(0, 15),
+                })
+              }
+            />
+          </label>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() =>
+              void copyText((activeMeta.tags ?? []).join(", ")).then(() =>
+                setCopied("tags"),
+              )
+            }
+          >
+            Copiar tags
+          </button>
+
+          <button
+            type="button"
+            className="cta small"
+            disabled={busy}
+            onClick={() =>
+              void run("Agendar no YouTube", async (update) => {
+                update("Calculando agenda…");
+                const preview = await previewPublishSlots(clipMeta.length);
+                if (
+                  !window.confirm(
+                    `Agendar ${clipMeta.length} clipe(s)?\n` +
+                      `Primeiro: ${preview.firstAt ? new Date(preview.firstAt).toLocaleString() : "?"}\n` +
+                      `Último: ${preview.lastAt ? new Date(preview.lastAt).toLocaleString() : "?"}\n\n` +
+                      "Requer export 9:16 + YouTube conectado nas Configurações.\n" +
+                      "Os vídeos sobem agora como privados e publicam nos horários.",
+                  )
+                ) {
+                  throw new Error("Cancelado pelo usuário");
+                }
+                update("Enfileirando uploads…");
+                const result = await scheduleProjectToYoutube(project.id);
+                return (
+                  `${result.message}\n` +
+                  `De ${new Date(result.firstAt).toLocaleString()} até ${new Date(result.lastAt).toLocaleString()}.`
+                );
+              })
+            }
+          >
+            Agendar no YouTube
           </button>
 
           <button

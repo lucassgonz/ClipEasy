@@ -252,3 +252,59 @@ export async function writeAssFile(
 ): Promise<void> {
   await writeFile(filePath, cuesToAss(cues, playResOrOpts), "utf8");
 }
+
+/** Keep cues that overlap `[windowStartMs, windowEndMs)` and shift them to local t=0. */
+export function sliceCaptionsForWindow(
+  cues: CaptionCue[],
+  windowStartMs: number,
+  windowEndMs: number,
+): CaptionCue[] {
+  const out: CaptionCue[] = [];
+  for (const c of cues) {
+    if (c.endMs <= windowStartMs || c.startMs >= windowEndMs) continue;
+    const startMs = Math.max(0, c.startMs - windowStartMs);
+    const endMs = Math.max(
+      startMs + 40,
+      Math.min(windowEndMs, c.endMs) - windowStartMs,
+    );
+    out.push({
+      ...c,
+      id: `${c.id}-s${windowStartMs}`,
+      startMs,
+      endMs,
+    });
+  }
+  return out;
+}
+
+/** Shift caption face-avoid anchors into a local clip window. */
+export function offsetCaptionAnchorTrack(
+  track: CaptionAnchorKeyframe[] | undefined,
+  offsetMs: number,
+  durationMs?: number,
+): CaptionAnchorKeyframe[] | undefined {
+  if (!track || track.length === 0) return undefined;
+  const end = durationMs != null ? offsetMs + durationMs : Infinity;
+  const mapped = track
+    .filter((k) => k.tMs >= offsetMs - 1 && k.tMs <= end + 1)
+    .map((k) => ({
+      tMs: Math.max(0, k.tMs - offsetMs),
+      place: k.place,
+    }));
+  if (mapped.length === 0) {
+    let nearest = track[0]!;
+    let best = Math.abs(nearest.tMs - offsetMs);
+    for (const k of track) {
+      const d = Math.abs(k.tMs - offsetMs);
+      if (d < best) {
+        best = d;
+        nearest = k;
+      }
+    }
+    return [{ tMs: 0, place: nearest.place }];
+  }
+  if (mapped[0]!.tMs > 0) {
+    mapped.unshift({ tMs: 0, place: mapped[0]!.place });
+  }
+  return mapped;
+}
